@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["devguard-core", "devguardd", "devguardctl", "devguard-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["devguard contributors"]
+
+[workspace.dependencies]
+devguard-core = { path = "devguard-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+libc = "0.2"
+
+[profile.dev]
+# Build caches live on a small system drive; line tables keep backtraces useful
+# without the multi-GB full debug info.
+debug = 1
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

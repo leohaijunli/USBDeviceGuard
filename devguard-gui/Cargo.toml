@@ -1,0 +1,34 @@
+[package]
+name = "devguard-gui"
+description = "devguard desktop UI, written in Rust with Native Shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+devguard-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+env_logger = "0.11"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+nsh-core = "=0.4.0"
+nsh-base = { version = "=0.4.0", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+nsh-platform-linux = { version = "=0.4.0", default-features = false }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos = { version = "=0.4.0", default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+base64 = "0.22"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+nsh-platform-windows = { version = "=0.4.0", default-features = false }
+
+[dev-dependencies]
+nsh-engine = { version = "=0.4.0", default-features = false }
+nsh-testing = { version = "=0.4.0", default-features = false }
