@@ -13,7 +13,7 @@ pub struct ConfigLoadError {
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LoadedStore {
     pub devices: Vec<DeviceConfig>,
     pub errors: Vec<ConfigLoadError>,

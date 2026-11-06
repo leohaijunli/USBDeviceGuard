@@ -20,7 +20,8 @@
 | 阶段 | 状态 | 证据 / 下一步 |
 | --- | --- | --- |
 | 0 NSH spike | Windows 侧完成；Linux 验收被用户暂缓 | 17 项测试 + 7 张原生截图；`scripts/verify-nsh-linux.sh` 待 Arch/Omarchy 执行 |
-| 1 core + 配置 | 完成（本机可测部分） | 33 项测试通过（26 单元 + 7 集成），clippy 干净；TOML 严格校验、跨设备身份冲突、备份/原子写、journal 追加/过滤/导出、损坏行容错、策略默认 audit、暂停上限、协议版本与只读分类 |
+| 1 core + 配置 | 完成（本机可测部分） | 33 项测试通过（26 单元 + 7 集成），clippy 干净 |
+| 2 daemon + udev | 决策核心完成；Linux 壳待写/待编译 | `devguardd` 纯核心 16 项测试通过（规则生成 4 + 决策 12），clippy 干净；`io.rs` 定义 DeviceIo 接缝，Linux socket/udev/termios/polkit 实现进行中，全部待 Linux 编译与真机验收 |
 | 2 daemon + udev | 未开始 | 当前 devguardd 仅占位入口 |
 | 3 termios/check/run | 未开始 | 需要 Linux pty 与真机 |
 | 4 事件/polkit/systemd | 未开始 | 需要 Linux system bus、polkit agent、systemd |
@@ -35,7 +36,20 @@
 - 不把待办项、空入口或模拟设备计为完成的产品功能。
 - 新结果更新本文件与 [`nsh-spike.md`](nsh-spike.md)，设计冲突更新 [`design.md`](design.md)。
 
-## 本次开发记录（阶段 1）
+## 本次开发记录（阶段 2，进行中）
+
+- 设计决策：`devguardd` 拆为两层——**纯决策核心**（`src/core.rs` + `src/rules.rs`，任何平台可编译可测试）与 **Linux I/O 壳**（socket、udevadm、sysfs、termios、pkcheck，只编译于 Linux）。核心通过 `src/io.rs` 的 `DeviceIo` trait 与设备 I/O 解耦，测试用 FakeIo 驱动完整状态机。
+- 纯核心已实现并测试（16 项，`cargo test -p devguardd` 全绿，workspace clippy 干净）：
+  - 授权门控：只读请求需 devguard 组或 root；修改/暂停需 polkit 正向决定（root 隐式通过）；拒绝写入 `request_denied` 审计。
+  - udev 规则生成：白名单转义（`"`、`%`、`$`、`\` 不可注入）；app 与 bootloader 双 id 共享同一 SYMLINK；无安全绑定值的 id 记入 skipped 而非生成宽松规则。
+  - enforce：未登记串口设备按 **USB 路径**（非 tty 编号）键控拦截；复合设备父层含非串口功能时 `set_authorized` 拒绝 → 保持放行并写 `block_refused` 审计，绝不盲目阻断。
+  - 暂停：enforcement 暂停释放已拦截设备（键控与拦截一致，tty 改号不丢放行标记）；暂停期间策略切换 busy 拒绝；到期/手动恢复返回 GUI 需提示的设备清单；暂停上限由核心强制（0/61 拒绝）。
+  - learn_candidate：按 VID/驱动/序列号猜测 kind 与 role（26ac→PX4，PID 0011→bootloader），无序列号自动落到 ID_PATH 并告警"绑定物理口"。
+  - save/delete：ConfigChanged 事件 + 前后 TOML 入 journal + WriteRules 效果；service 暂停时 apply busy 拒绝。
+  - check：偏差产生 DriftDetected 事件；多设备匹配同一配置记为 error（身份冲突）。
+  - shutdown：ServiceStopping 事件 + 操作者审计 + Shutdown 效果（壳负责按选项释放或保持拦截后 exit 0）。
+- 修正的语义（由测试逼出）：暂停放行的键必须是 USB 路径而非 devnode，否则 tty 改号后放行失效；`on_device_facts` 需维护在线快照供恢复清单使用。
+- 待办（本阶段后续）：Linux 壳（Unix socket + SO_PEERCRED、udevadm monitor/info 解析、termios 设置与回读、sysfs authorized/power、pkcheck 调用、devguard-apply@.service），`udevadm test` 验证规则，真机插拔验收。
 
 - 用户指示跳过阶段 0 的 Linux 验收，继续后续阶段（偏离已记录于"待验收"）。
 - 新增 `devguard-core/tests/integration.rs`，7 项集成测试全部通过：

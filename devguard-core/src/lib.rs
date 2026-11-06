@@ -19,7 +19,7 @@ pub use config::{
 };
 pub use doctor::{DoctorItem, DoctorReport, DoctorStatus};
 pub use identity::{match_quality, Binding, DeviceStatus, OnlineDevice, UdevFacts};
-pub use journal::{JournalEntry, JournalQuery, LogFilter};
+pub use journal::{Journal, JournalEntry, JournalQuery, LogFilter};
 pub use paths::Paths;
 pub use policy::{PauseKind, PauseState, PolicyMode, ServiceState, StartupReconcile};
 pub use protocol::{
