@@ -28,14 +28,14 @@ NSH 固定使用当前已安装的 `0.4.0`，精确 API 以该版本 crate 源�
 | ModemManager/brltty | udev 忽略标记；doctor 说明抢占证据与修复方式 | 待 udev 和服务实测 |
 | 自动挂起 | 只操作已确认 USB 设备的 power 属性；service 暂停禁止写 | 待 Linux sysfs |
 | 轻量 udev | 链接、权限、systemd oneshot 触发；停止时 oneshot 不能意外拉起 daemon | 待单元依赖与 udev 测试 |
-| 串口范围 | ttyACM/ttyUSB 只是候选；阻断前还要核查 USB 父设备影响范围 | 待复合 USB 描述符与接口检查 |
+| 串口范围 | ttyACM/ttyUSB 只是候选；阻断前还要核查 USB 父设备影响范围 | 已实现只读复合接口判定（`ID_USB_INTERFACES`）；enforce 前的 I/O 拒阻仍待真机验证 |
 | audit/enforce | audit 默认；服务端重新 check 后切 enforce，不能只信任 GUI 先前的检查结果 | 待阶段 5 |
 
 ## 必须在实现前解决的语义
 
 ### 复合 USB 设备
 
-对整个 USB 设备写 `authorized=0` 可能影响多个接口。仅检查 tty 名称不能证明其他接口不会被断开。实现必须检查授权目标是否还包含 HID、hub、存储等禁止阻断的功能；无法确定时不执行阻断并在 check/doctor 报告。不能仅凭 tty 子接口来关闭 USB 父 hub。
+对整个 USB 设备写 `authorized=0` 可能影响多个接口。仅检查 tty 名称不能证明其他接口不会被断开。实现必须检查授权目标是否还包含 HID、hub、存储等禁止阻断的功能；无法确定时不执行阻断并在 check/doctor 报告。不能仅凭 tty 子接口来关闭 USB 父 hub。已把 `ID_USB_INTERFACES` 解析为只读 `interface_unknown` / `forbidden_interface_class`，doctor 逐设备报告；enforce 的 I/O 拒阻（`set_authorized` 返回）仍待真机验证。
 
 ### 暂停结束与“保持放行到拔出”
 

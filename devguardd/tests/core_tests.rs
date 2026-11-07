@@ -703,6 +703,34 @@ fn every_query_response_preserves_the_request_id() {
 }
 
 #[test]
+fn doctor_flags_a_composite_device_that_share_forbidden_interfaces() {
+    let mut daemon = daemon();
+    let mut io = FakeIo::with_px4_and_adapter();
+    // Give the PX4 a HID (keyboard) sibling on the same USB parent.
+    io.devices[0].properties.insert(
+        "ID_USB_INTERFACES".into(),
+        ":030101:020200:".into(),
+    );
+    io.devices[0].forbidden_interface_class = true;
+    let handled = daemon.handle(&mut io, &group_caller(), Some(1), Request::Doctor);
+    assert!(handled.response.ok);
+    let report = &handled.response.data;
+    let text = serde_json::to_string(&report).unwrap();
+    assert!(text.contains("composite.ttyACM0"), "{text}");
+}
+
+#[test]
+fn doctor_warns_when_a_device_has_no_usable_interface_list() {
+    let mut daemon = daemon();
+    let mut io = FakeIo::with_px4_and_adapter();
+    io.devices[0].interface_unknown = true; // no ID_USB_INTERFACES at all
+    let handled = daemon.handle(&mut io, &group_caller(), Some(1), Request::Doctor);
+    assert!(handled.response.ok);
+    let text = serde_json::to_string(&handled.response.data).unwrap();
+    assert!(text.contains("composite.ttyACM0") && text.contains("no usable ID_USB_INTERFACES"), "{text}");
+}
+
+#[test]
 fn check_returns_drift_events_for_subscribers() {
     let mut daemon = daemon();
     let mut io = FakeIo::with_px4_and_adapter();

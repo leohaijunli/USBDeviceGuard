@@ -70,6 +70,7 @@
 - Linux 真实 socket 测试已覆盖保存/查询/删除、身份冲突、内核身份优先于客户端伪造、拒绝审计、事件顺序/停止 EOF、枚举/规则失败、沙箱目录保护、超大响应和重启后审计回读。启动日志明确区分 daemon 身份与未知的启动发起人。
 - WSL 工具链原缺 clippy/rustfmt，已补充用户工具链组件；Linux clippy 的队列枚举尺寸和测试字面量告警已修正，**最终 `-D warnings` 通过**。
 - 接入前修正：serial 匹配失败不得退回 path；只接受有 USB 证据及数字后缀的 tty；删除/查询名称拒绝路径穿越；配置 symlink 与损坏配置不能被静默读取或忽略；规则限定 ttyACM/ttyUSB、保留显式组并拒绝危险值；响应编号和 check 偏差事件正确返回。
+- 新增复合 USB 安全判定：解析 `ID_USB_INTERFACES` 得到接口类，`UdevFacts` 携带 `interface_unknown` / `forbidden_interface_class`，doctor 逐设备报告 HID/hub/storage/video/audio 接口或缺失接口列表。只读、不越界；enforce 前的 I/O 拒阻仍待真机验证。
 - 新增 `devguardd/src/linux/` 和 Unix 客户端/CLI。仅提供 audit 与配置链路；硬件操作明确拒绝，详细边界及运行方法见 [`linux-shell.md`](linux-shell.md)。
 - 工程师确认三个测试边界：Unix socket 的请求/鉴权/审计/事件、只读 udev/sysfs Inventory、Client/CLI 协议与错误处理。
 - 实际 CLI 验证发现需求示例 `parity = "N"` 被仅接受小写的枚举拒绝。已用 CLI 文件解析最小回归复现，并在共享 `Parity` 增加 `N/E/O` 反序列化别名；保留原小写输出与兼容性。六种大小写输入的回归、原始 CLI 验证及全套测试均通过。

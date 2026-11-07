@@ -79,6 +79,14 @@ pub struct UdevFacts {
     pub is_usb: bool,
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
+    /// True when udev did not report ID_USB_INTERFACES, or it was malformed:
+    /// the device cannot be assumed safe to deauthorize.
+    #[serde(default)]
+    pub interface_unknown: bool,
+    /// True when the USB parent also exposes a HID, hub, storage, video or
+    /// audio interface: deauthorizing it would block more than the serial port.
+    #[serde(default)]
+    pub forbidden_interface_class: bool,
 }
 
 impl UdevFacts {
@@ -115,6 +123,13 @@ impl UdevFacts {
                 .get("ID_USB_INTERFACES")
                 .is_some_and(|value| value.contains(":0202:"));
         let is_usb = properties.get("ID_BUS").is_some_and(|bus| bus == "usb") || !vid.is_empty();
+        // The interface classes come from the same properties; a malformed or
+        // missing value must not silently pass a composite-safety gate.
+        let interfaces = parse_usb_interfaces(properties.get("ID_USB_INTERFACES").map(String::as_str).unwrap_or(""));
+        let (interface_unknown, forbidden_interface_class) = match interfaces {
+            Ok(classes) => (false, classes.iter().any(|class| forbidden_usb_class(*class))),
+            Err(_) => (true, false),
+        };
         Some(Self {
             devnode,
             subsystem,
@@ -132,6 +147,8 @@ impl UdevFacts {
             is_cdc_acm,
             is_usb,
             properties,
+            interface_unknown,
+            forbidden_interface_class,
         })
     }
 
@@ -160,6 +177,29 @@ impl UdevFacts {
             .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
     }
 
+    /// The interface classes a composite USB parent exposes, from the udev
+    /// `ID_USB_INTERFACES` value (`:XXYYZZ:XXYYZZ:` where `XX` is the class,
+    /// `YY` the subclass, `ZZ` the protocol). A missing or malformed value
+    /// means "unknown" and is reported, not silently assumed safe.
+    pub fn usb_interface_classes(&self) -> Result<Vec<u8>, String> {
+        let Some(raw) = self.properties.get("ID_USB_INTERFACES") else {
+            return Err("no ID_USB_INTERFACES from udev".into());
+        };
+        parse_usb_interfaces(raw)
+    }
+
+    /// Whether deauthorizing this USB parent would also disable HID, hub or
+    /// mass-storage interfaces, which `enforce` must never do. The function
+    /// classes come from the USB class code (the first byte of each
+    /// `:XXYYZZ:` triplet); subclass and protocol are ignored here because the
+    /// class already forbids the whole family (keyboards, mice, hubs, disks).
+    pub fn affects_forbidden_interface_class(&self) -> Result<bool, String> {
+        Ok(self
+            .usb_interface_classes()?
+            .iter()
+            .any(|class| forbidden_usb_class(*class)))
+    }
+
     pub fn to_online(&self) -> OnlineDevice {
         OnlineDevice {
             devnode: self.devnode.clone(),
@@ -174,6 +214,8 @@ impl UdevFacts {
             vendor: self.vendor.clone(),
             subsystem: self.subsystem.clone(),
             is_cdc_acm: self.is_cdc_acm,
+            interface_unknown: self.interface_unknown,
+            forbidden_interface_class: self.forbidden_interface_class,
             status: DeviceStatus::Unregistered,
             managed_by: None,
             binding: None,
@@ -202,6 +244,10 @@ pub struct OnlineDevice {
     pub vendor: Option<String>,
     pub subsystem: String,
     pub is_cdc_acm: bool,
+    #[serde(default)]
+    pub interface_unknown: bool,
+    #[serde(default)]
+    pub forbidden_interface_class: bool,
     pub status: DeviceStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_by: Option<String>,
@@ -258,6 +304,45 @@ pub fn match_quality<'a>(
         }
     }
     None
+}
+
+/// The USB interface classes of an `ID_USB_INTERFACES` value: each
+/// `:XXYYZZ:` triplet contributes `XX`, the interface class. Unknown or
+/// malformed input is an error, so a caller reports it rather than assuming
+/// the device is safe to deauthorize.
+pub fn parse_usb_interfaces(value: &str) -> Result<Vec<u8>, String> {
+    let value = value.trim();
+    let inner = value
+        .strip_prefix(':')
+        .and_then(|value| value.strip_suffix(':'))
+        .ok_or_else(|| {
+            format!("ID_USB_INTERFACES must be a `:XXYYZZ:` list, got `{value}`")
+        })?;
+    let mut classes = Vec::new();
+    if inner.is_empty() {
+        return Ok(classes);
+    }
+    for triplet in inner.split(':') {
+        if triplet.is_empty() || triplet.len() % 2 != 0 {
+            return Err(format!("invalid interface triplet `{triplet}` in `{value}`"));
+        }
+        let class = u8::from_str_radix(&triplet[0..2], 16)
+            .map_err(|_| format!("invalid interface class in `{value}`"))?;
+        classes.push(class);
+    }
+    Ok(classes)
+}
+
+/// USB base class codes whose deauthorization would block HID, hubs or
+/// storage. Enforce must never touch these families, even through a
+/// composite parent that also carries a serial interface.
+pub fn forbidden_usb_class(class: u8) -> bool {
+    matches!(
+        class,
+        0x03 /* HID: keyboards, mice */ | 0x09 /* hub */
+            | 0x08 /* mass storage: disks, card readers */ | 0x0e /* video */
+            | 0x01 /* audio */
+    )
 }
 
 #[cfg(test)]
@@ -390,5 +475,48 @@ mod tests {
         assert_eq!(facts.vid, "1a86");
         assert_eq!(facts.kernel_name(), "ttyUSB0");
         assert!(facts.is_managed_tty());
+    }
+
+    #[test]
+    fn interface_classes_parse_the_class_of_each_triplet() {
+        assert_eq!(parse_usb_interfaces(":020200:0a0000:").unwrap(), vec![0x02, 0x0a]);
+        assert_eq!(parse_usb_interfaces(":020200:").unwrap(), vec![0x02]);
+        assert!(parse_usb_interfaces("020200").is_err());
+        assert!(parse_usb_interfaces(":").is_err());
+        assert!(parse_usb_interfaces("").is_err());
+        assert!(parse_usb_interfaces(":GG0000:").is_err());
+    }
+
+    #[test]
+    fn composite_parent_with_hid_or_hub_or_storage_is_forbidden() {
+        let mut facts = facts("26ac", "0032", Some("ABC"), None);
+        facts.properties.insert(
+            "ID_USB_INTERFACES".into(),
+            ":030101:020200:".into(), // HID keyboard + CDC-ACM serial
+        );
+        assert!(facts.affects_forbidden_interface_class().unwrap());
+        facts.properties.insert(
+            "ID_USB_INTERFACES".into(),
+            ":080650:020200:".into(), // mass storage + CDC-ACM
+        );
+        assert!(facts.affects_forbidden_interface_class().unwrap());
+        facts.properties.insert(
+            "ID_USB_INTERFACES".into(),
+            ":090000:020200:".into(), // hub + CDC-ACM
+        );
+        assert!(facts.affects_forbidden_interface_class().unwrap());
+    }
+
+    #[test]
+    fn a_pure_serial_parent_is_not_forbidden() {
+        let mut facts = facts("26ac", "0032", Some("ABC"), None);
+        facts.properties.insert("ID_USB_INTERFACES".into(), ":020200:".into());
+        assert!(!facts.affects_forbidden_interface_class().unwrap());
+    }
+
+    #[test]
+    fn missing_interfaces_is_reported_not_assumed_safe() {
+        let facts = facts("26ac", "0032", Some("ABC"), None);
+        assert!(facts.affects_forbidden_interface_class().is_err());
     }
 }

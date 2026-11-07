@@ -997,6 +997,23 @@ impl Daemon {
                 ));
             }
         }
+        for device in &online {
+            if device.forbidden_interface_class {
+                items.push(DoctorItem::new(
+                    format!("composite.{}", device.name),
+                    format!("`{}` shares its USB parent with HID, hub, storage, video or audio interfaces", device.name),
+                    DoctorStatus::Error,
+                    "deauthorizing it would disable other interfaces; enforce must not block it until the composite-safety gate is accepted",
+                ));
+            } else if device.interface_unknown {
+                items.push(DoctorItem::new(
+                    format!("composite.{}", device.name),
+                    format!("`{}` has no usable ID_USB_INTERFACES from udev", device.name),
+                    DoctorStatus::Warning,
+                    "it cannot be assumed safe to deauthorize; a composite check is required before enforce",
+                ));
+            }
+        }
         Handled::ok(
             id,
             DoctorResponse { report: DoctorReport::new(items) },
