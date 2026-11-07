@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | 0 NSH spike | Windows 侧完成；Linux 验收被用户暂缓 | 17 项测试 + 7 张原生截图；`scripts/verify-nsh-linux.sh` 待 Arch/Omarchy 执行 |
 | 1 core + 配置 | 完成（软件可测部分） | Windows 28 单元 + 9 集成通过；Linux 另含 1 项 symlink 集成和 5 项 Unix 客户端测试 |
-| 2 daemon + udev | audit/配置 RPC 与 CLI 软件链路通过；真机门禁未完成 | 纯核心 22 项、Linux Inventory 4 项及 socket RPC 9 项通过；实际 CLI 9 次操作、私有规则 `udevadm verify` 通过；`apply`、规则安装及真机门禁仍未完成 |
+| 2 daemon + udev | audit/配置 RPC 与 CLI 软件链路通过；WSL 实机只读转接验收通过；桌面规则激活与热插拔未完成 | 纯核心 22 项、Linux Inventory 4 项及 socket RPC 9 项通过；实际 CLI 9 次操作、私有规则 `udevadm verify` 通过；WSL 实机转接后枚举 0→1，learn/save/check/doctor/规则匹配键对实机验证通过（`artifacts/linux-real-attach-2026-11-07.md`）；`apply`、规则安装到主机及热插拔门禁仍未完成 |
 | 3 termios/check/run | 未开始 | 需要 Linux pty 与真机 |
 | 4 事件/polkit/systemd | 未开始 | 需要 Linux system bus、polkit agent、systemd |
 | 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境 |
@@ -59,6 +59,16 @@
 - 实际 WSL `udevadm monitor` 启停及 CLI/私有规则语法验证通过，产物 `artifacts/linux-monitor-cli-2026-11-07.json`。仍未转接 USB，WSL 只读枚举为 0。
 - 工程师确认后已下载并交互安装 `usbipd-win 5.3.0 x64`，SHA256/签名有效、exit 0、无需重启。当前设备为 `V6X Rust CDC` / COM4 / `1209:0001` / `V6X-RUST-001` / BUSID `2-3`；普通 bind 成功，列表显示 `Shared`。
 - 工具提示 `hhdusbh64` USB filter 可能不兼容，未使用 `bind --force`。工程师已确认转接，attach 因 WSL2 发行版未运行而失败，尚未成功转接。随后优先处理 GUI 密度与新增提示；正式 GUI 仍未接 Linux daemon。
+
+### 真机只读转接与清单/规则验收（2026-11-07 续）
+
+- WSL `Ubuntu-26.04` 运行后重试此前已确认的转接：`usbipd attach --wsl --busid 2-3` 成功，Windows 侧 `Attached`（转接期间 COM4 暂不可用），未弹管理员确认。WSL 内核 `6.6.114.1` 加载 `vhci_hcd`/`usbip_core`，`cdc_acm` 绑定出 `/dev/ttyACM0`（`root:dialout 0660`，166:0）。
+- 二进制在复合接口判定提交（`cb1c4e4`）之后重建。实机 udev 只读属性：`1209:0001`、`ID_SERIAL_SHORT=V6X-RUST-001`、`ID_USB_INTERFACES=:020200:0a0000:`（两个接口均为 CDC-ACM，无 HID/hub/存储/视频/音频）。
+- **里程碑：Linux 只读枚举 0 → 1**。daemon `--root` 沙箱内 `list` 报告 1 台在线 USB 串口；`doctor` 对实机无问题（`forbidden_interface_class=false`、`interface_unknown=false`）；`learn` 正确给出 serial 绑定草案并取 USB 父路径 `usb1/1-1`（非 tty 节点），带 CDC-ACM baud 不校验告警。
+- `save` 后生成私有规则 `90-devguard.rules`（ttyACM/ttyUSB + VID/PID/serial 匹配、`devguard/` symlink、`dialout 0660`、`ID_MM_DEVICE_IGNORE`、systemd apply 钩子）。真实 `udevadm verify` 通过（Success: 1 / Fail: 0）；规则四个匹配键与实机 sysfs 只读逐一核对一致。
+- 保存后 `list` 显示 registered: 1、状态 Drift；`check` 的 `access: ok` 是对真实 devnode 组/模式的核对，其余 warning（symlink、ModemManager 标记、termios/autosuspend）均为"规则未激活/阶段 3 未做"的正确门禁表现。`show`/`log` 完整，`shutdown` 正常退出并清理私有 socket。
+- 全程未打开串口、未安装主机规则、未 `udevadm trigger`/`test`、未写 `authorized`/power、无固件操作。原始记录：`artifacts/linux-real-attach-2026-11-07.md`（不提交）。
+- 仍待验收：真实桌面 Linux（WSL 外）的规则激活与热插拔、阶段 3 termios、enforce I/O 拒阻真机验证。`usbipd detach --busid 2-3` 可把 COM4 还给 Windows。
 
 - 工程师取消固件刷写，要求继续 `USBDeviceGuard`；本轮没有串口打开、固件写入、USB 转接/反授权、系统规则安装或服务配置变更。
 - 当前主机是 Windows `LMX`，仓库位于 `C:\Users\leeli\Downloads\USBDeviceGuard`。开始时 `main` 工作树干净，HEAD 为 `5d4dd01`。
