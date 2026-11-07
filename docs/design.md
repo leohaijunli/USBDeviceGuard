@@ -1,12 +1,22 @@
 # devguard 设计决策与实测记录
 
-基线：[`requirements.md`](requirements.md)。当前处于阶段 0，本文中的待验证内容尚非真机结论。
+基线：[`requirements.md`](requirements.md)。当前处于阶段 2；本文中的软件验证不能替代 Linux 真机或桌面验收。
 
 ## 开发顺序与环境
 
 目标运行平台是 Linux / GTK 4.14+ / systemd / udev。当前编码工具运行于 Windows。Windows 上编译 Rust、headless 测试和窗口检查用于发现代码问题，Linux/Wayland 验收仍须在目标环境执行。
 
 NSH 固定使用当前已安装的 `0.4.0`，精确 API 以该版本 crate 源码为准；官网 main 文档可能更新更快。GUI 为纯 Rust，保留官方模板的 `#[native_module]`、`#[component]`、`nsh.json` 和平台入口结构。
+
+### 阶段 2 Linux 壳的安全边界
+
+- WSL2 Ubuntu 26.04 已可用于 Linux 编译和真实 Unix socket 测试；WSL 中的 USB、polkit 桌面提示和 Arch/Wayland 仍须分别验收。
+- 在现有 `Daemon` / `DeviceIo` 接缝上接入 Linux 库存和 RPC，单一 worker 串行执行决策、持久化审计和后续 effect。枚举失败必须返回错误，不能伪装为空设备清单。
+- 此版本只运行 audit；live apply、授权写入、策略切换和暂停均拒绝。不会把尚未通过复合设备/termios 验证的状态机暴露为真实拦截功能。
+- system 模式使用内核 peer uid/gid/pid、`/proc` 启动时间/组和本地账户；polkit 的 process subject 包含 `pid,start_time,uid`，不接受客户端身份字段。
+- `--root` 是同 uid、私有文件树的开发能力，不是绕过生产 polkit 的开关。Linux 硬件只读，生成规则不 reload 主机 udev；sandbox 结果不得计为 polkit 或权限安装验收。
+- 配置保存/删除与规则激活不是跨文件事务：若规则更新失败，明确返回已保存配置的 `rules_failed`，保留真实配置事件与审计；不隐式恢复旧配置或宣称设备已应用。
+- 客户端与服务端共同限制帧长；响应编号必须匹配，事件序号递增。慢订阅者落后时明确断开并要求新快照，不能静默丢事件。
 
 ## 需求第 3 节的决策登记
 
@@ -58,8 +68,34 @@ NSH 固定使用当前已安装的 `0.4.0`，精确 API 以该版本 crate 源�
 
 ## NSH 能力缺口（待版本源码核验）
 
-- 托盘/桌面通知：尚未完成 0.4.0 API 核验。若缺失，按需求使用 daemon 经 D-Bus 发桌面通知；需确定用户 session bus 的可信路由，不自造通知系统。
-- 窗口关闭前确认：需核查原生关闭事件/拦截能力，覆盖窗口按钮与 Hyprland 关闭动作，不能只在自定义“退出”按钮上提示。
+### Windows 后台窗口设计修订（2026-11-07）
+
+- 工程师要求 `X` 只隐藏后台，托盘右键退出才结束 GUI，详见 `ui-design.md`。
+- 已核查项目解析的 NSH 0.4.0：`AppOptions` 不提供关闭策略/托盘回调，但公开 `AppView::new(Some(parent), ...)`、`hwnd`、`load`、`stop` 供原生宿主嵌入。
+- 实现方向是应用自己的 Win32 顶层窗口和原生托盘菜单，NSH 作为子视图；不修改依赖源码、不臆造 NSH 关闭/托盘 API。原生窗口和托盘行为属于应用宿主，设备数据属于现有 HardwareStore。
+- Windows 的 `X` 隐藏、`Show` 恢复及 `Exit` 退出已验收；Linux 托盘/Wayland 仍待单独实现与验收。
+
+### 非全屏窗口尺寸与滚动（2026-11-07 修订）
+
+- 宿主窗口尺寸按逻辑点换算 DPI（`GetDpiForWindow` + `AdjustWindowRectExForDpi`），不再用物理像素创建 1120×760：150% 屏下后者会变成 747×507 逻辑点，导致非全屏内容被截断。
+- 默认窗口 1120×760 逻辑点，居中并限制在工作区内；`WM_GETMINMAXINFO` 给最小 900×700 逻辑点，`WM_DPICHANGED` 采用建议矩形并重排内嵌 `AppView`。
+- 全局 `set_scrollbar_theme(ScrollbarMode::Always)` 让有滚动范围的视图常显可拖动条；NSH 的 `shown()` 在无范围时不绘制，因此不会到处出现假滚动条。
+- 页面区外层 `scroll()` 的 padding 移到内容子视图。实测：padding 放在 scroll 自身时，每个尺寸都会多出几十点的假滚动（内置条以绝对定位贴在滚动视口上，其溢出矩形会再叠加 scroll 的 padding）；放在内容上则滚动范围只在内容真正超高时出现。
+- 列表 `content_padding_x` 为滚动条预留右缘空间，避免滑块压住行尾内容。
+- headless 回归新增：最小 900×700 视图下页面整体可见，指南在其自己的滚动视口内可达底部。
+
+### 新设备通知与紧凑详情（2026-11-07 修订）
+
+- `hardware/arrivals.rs` 是快照差分与去重的唯一实现：首个成功快照为基线，USB 串口实例 ID 大小写不敏感，使用 NSH 单调时钟作五分钟冷却。过期记录只在快照到达时清理，不轮询设备。
+- `HardwareStore` 将新增事实交给 `ui/toast.rs`；`ToastManager`/`ToastStack`/`Toast` 使用 NSH 0.4.0 公开 API，状态在绑定中读取，定时器仅在有提示且窗口可见时推进生命周期。
+- `desktop_notifications.rs` 是应用宿主的原生边界：有界队列（8 批通知、32 条可见性/选择事件）和无指针 Win32 消息连接两个线程。隐藏时调用系统 `Shell_NotifyIconW`，点击后恢复同一窗口；不改 NSH、不另造通知窗口或查询设备。
+- 设备页消费一次性定位请求，核对设备仍在线并打开详情；当前模态保留。设备拔出后旧提示不可打开错误设备。
+- PowerShell 的 `Register-WmiEvent` 无 `-Action` 时可能没有返回值；成功与否以 `Get-EventSubscriber` 为准，仍先订阅后建立快照。GUI owner 销毁会取消并回收自己的监视进程，不等待下一次设备广播。
+- `ui::metadata` 统一紧凑标签—值列；页头、面板头、列表与详情采用同一 4pt 刻度，典型行估计同步到 56pt，长备注不挤入窄值列。
+- 测试快照和注入入口仅在 `cfg(test)` 下编译；物理插拔和原生后台通知的可见效果仍需真机验收。
+
+- Linux 托盘/桌面通知：仍待实现与核验；若 NSH 缺系统接口，daemon 经 D-Bus 发桌面通知，并验证用户 session bus 路由。
+- Linux 窗口关闭动作（含 Hyprland）需符合 `X` 隐藏语义，不再采用旧的关闭确认提示。
 - Linux GTK / Hyprland、IME、焦点与原生弹层：当前环境未验证，见 `nsh-spike.md`。
 
 ## NSH 0.4.0 的实测 API / 工具差异

@@ -1,12 +1,12 @@
 # devguard 开发与验收进度
 
-更新：2026-11-06。
+更新：2026-11-07。
 
-## 当前门禁：阶段 0（进行中）
+## 当前门禁：阶段 2（进行中；Linux 真机验收未通过）
 
-需求基线已写入 [`requirements.md`](requirements.md)。按照用户的阶段门禁，Linux NSH spike 验收通过后再进入阶段 1。
+需求基线见 [`requirements.md`](requirements.md)。工程师先前暂缓阶段 0 的 Linux 桌面验收并要求继续开发；该偏离保留，不能以 WSL 软件测试代替 Arch/Omarchy/Wayland 验收。
 
-会话环境实测：
+2026-11-06 的历史环境实测：
 
 - 工作目录：`\\Artemis\Users\HLi\Downloads\devguard`，初始为空目录，非 Git 仓库。
 - 当前执行环境为 Windows；Rust / Cargo 已安装。
@@ -20,9 +20,8 @@
 | 阶段 | 状态 | 证据 / 下一步 |
 | --- | --- | --- |
 | 0 NSH spike | Windows 侧完成；Linux 验收被用户暂缓 | 17 项测试 + 7 张原生截图；`scripts/verify-nsh-linux.sh` 待 Arch/Omarchy 执行 |
-| 1 core + 配置 | 完成（本机可测部分） | 33 项测试通过（26 单元 + 7 集成），clippy 干净 |
-| 2 daemon + udev | 决策核心完成；Linux 壳待写/待编译 | `devguardd` 纯核心 16 项测试通过（规则生成 4 + 决策 12），clippy 干净；`io.rs` 定义 DeviceIo 接缝，Linux socket/udev/termios/polkit 实现进行中，全部待 Linux 编译与真机验收 |
-| 2 daemon + udev | 未开始 | 当前 devguardd 仅占位入口 |
+| 1 core + 配置 | 完成（软件可测部分） | Windows 28 单元 + 9 集成通过；Linux 另含 1 项 symlink 集成和 5 项 Unix 客户端测试 |
+| 2 daemon + udev | audit/配置 RPC 与 CLI 软件链路通过；真机门禁未完成 | 纯核心 22 项、Linux Inventory 4 项及 socket RPC 9 项通过；实际 CLI 9 次操作、私有规则 `udevadm verify` 通过；`apply`、规则安装及真机门禁仍未完成 |
 | 3 termios/check/run | 未开始 | 需要 Linux pty 与真机 |
 | 4 事件/polkit/systemd | 未开始 | 需要 Linux system bus、polkit agent、systemd |
 | 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境 |
@@ -35,6 +34,48 @@
 - 每个实测记录命令、环境、结果；失败保留原因和下一步。
 - 不把待办项、空入口或模拟设备计为完成的产品功能。
 - 新结果更新本文件与 [`nsh-spike.md`](nsh-spike.md)，设计冲突更新 [`design.md`](design.md)。
+
+## 2026-11-07：本机 WSL 与阶段 2 续开发
+
+### 只读 udev 监视续开发结果
+
+### Windows GUI 设备显示与后台生命周期修订
+
+- 工程师要求本应用不提供固件烧录入口，并修订为 `X` 隐藏后台、托盘右键 `Exit` 才正常结束 GUI；需求和 `ui-design.md` 已同步。
+- GUI 空设备问题复现：旧脚本能找到 COM4，但耗时 33.78 秒，超过 25 秒启动看门狗；另将 Bluetooth COM5/COM6 误归为 USB。已改为只处理 USB 来源的串口、按设备缓存批量 PnP 属性，保留 90 秒有界冷启动预算。
+- 同机同只读扫描复测：9.86 秒，1 个 USB 串口 `COM4 / V6X Rust CDC / 1209:0001 / V6X-RUST-001`，Bluetooth COM5/COM6 正确隐藏。没有打开串口或改变设备参数。
+- Windows 使用应用自己的 Win32 顶层宿主和托盘，嵌入 NSH 0.4.0 的公开 `AppView`，不修改 NSH。`X` 隐藏且窗口/进程保留的原生回归通过。
+- GUI `cargo test -p devguard-gui --locked -- --test-threads=1`：34 项通过（20 单元/通知引擎、11 交互、1 原生生命周期、2 Windows 扫描）；GUI clippy `--all-targets --locked -- -D warnings` 通过。
+- 修复非全屏内容不全：宿主窗口改为按 DPI 缩放逻辑点（默认 1120×760、最小 900×700、`WM_DPICHANGED` 建议矩形），外层页面滚动视图的内边距移到内容子视图以消除假滚动。实测默认/最小/普通三种窗口内容完整，设备/记录/指南各自滚动条常显且可拖动（2026-11-07）。
+- 新版窗口已启动；Windows UI Automation 确认窗口可见且 COM4 可访问。工程师随后确认 COM4 显示、`X` 隐藏、托盘 `Show` 恢复和 `Exit` 退出全部正常（2026-11-07）。Linux 托盘行为未验收，不计为完成。
+- 本轮紧凑布局收紧头部/内容区/列表，详情改为共享标签—值行；保留字号、长值复制、单栏回退和区域滚动。
+- 本机 150% DPI 截图核对：默认 1702×1128、普通 1500×1106、最小 1372×1106 物理像素，COM4 可见；实际 UI 已显示 `Watching device changes`。这是只读扫描/布局验收，不是物理插拔或后台通知验收。
+- 新增只读 USB 串口 Toast 与 `View` 定位，首快照不弹、同实例五分钟去重、自动关闭、断开后禁用查看；模态草稿不受通知影响。隐藏/最小化时有 Windows 托盘通知入口，点击恢复同一窗口，不抢焦点。
+- 修复自动更新误判：无返回值的 WMI 订阅不再被当成失败；新增订阅与取消子进程回归。真实插拔及后台通知可见效果仍待验收，未因此提交代码。
+
+- 工程师确认继续只读监听与事件测试；新增 `devguardd/src/linux/monitor.rs`，启动固定 `udevadm monitor --udev --property --subsystem-match=tty`，先完成就绪握手再建立快照。
+- 事件触发只读 Inventory 对账，不定时轮询；差异发布增减/更新事件，改号先删旧节点再加新节点。监视异常写 `monitor_failed` 并退出，停止时终止/回收自己启动的监视进程。
+- 最近 core/daemon/CLI 软件验收：**WSL 92 项通过、Windows 63 项通过，两端 clippy 干净**；GUI 测试另行统计。新增 Monitor 5 项、Hotplug socket 5 项均使用隔离输入/USB fixture，不是实际硬件插拔结论。
+- 实际 WSL `udevadm monitor` 启停及 CLI/私有规则语法验证通过，产物 `artifacts/linux-monitor-cli-2026-11-07.json`。仍未转接 USB，WSL 只读枚举为 0。
+- 工程师确认后已下载并交互安装 `usbipd-win 5.3.0 x64`，SHA256/签名有效、exit 0、无需重启。当前设备为 `V6X Rust CDC` / COM4 / `1209:0001` / `V6X-RUST-001` / BUSID `2-3`；普通 bind 成功，列表显示 `Shared`。
+- 工具提示 `hhdusbh64` USB filter 可能不兼容，未使用 `bind --force`。工程师已确认转接，attach 因 WSL2 发行版未运行而失败，尚未成功转接。随后优先处理 GUI 密度与新增提示；正式 GUI 仍未接 Linux daemon。
+
+- 工程师取消固件刷写，要求继续 `USBDeviceGuard`；本轮没有串口打开、固件写入、USB 转接/反授权、系统规则安装或服务配置变更。
+- 当前主机是 Windows `LMX`，仓库位于 `C:\Users\leeli\Downloads\USBDeviceGuard`。开始时 `main` 工作树干净，HEAD 为 `5d4dd01`。
+- 已确认 WSL2：`Ubuntu-26.04`（默认）及 `Ubuntu-24.04`。本轮使用前者，用户 `dev` / uid 1000，PID 1 为 `systemd`；Rust 1.99.0，udevadm 259，cargo/rustc/udevadm/systemctl/pkcheck/python3 可用。
+- Windows 只读枚举：`PX4 FMU v6X.x` / `COM3` / `3185:0035`，PnP 状态 OK、ProblemCode 0。它不是历史记录中的 `V6X Rust CDC` / COM26；没有因此修改固件或假定 bootloader 身份。
+- 构建缓存分别使用 Windows `target` 和 Linux `/home/dev/.cache/devguard-target-lmx`，不混用。
+- 原始基线 `cargo test -p devguard-core -p devguardd --locked`：Windows 49 项通过。本轮最终 Windows 的 core/daemon/CLI 测试 **63 项通过**，这三个 crate 的 `cargo clippy --all-targets -- -D warnings` 通过。
+- Linux `cargo test -p devguard-core -p devguardd -p devguardctl --locked`：**82 项通过** = core 单元 28 + core 集成 10 + Unix client 5 + CLI 4 + daemon 规则 8 + 决策 14 + Inventory 4 + socket RPC 9。
+- Linux 真实 socket 测试已覆盖保存/查询/删除、身份冲突、内核身份优先于客户端伪造、拒绝审计、事件顺序/停止 EOF、枚举/规则失败、沙箱目录保护、超大响应和重启后审计回读。启动日志明确区分 daemon 身份与未知的启动发起人。
+- WSL 工具链原缺 clippy/rustfmt，已补充用户工具链组件；Linux clippy 的队列枚举尺寸和测试字面量告警已修正，**最终 `-D warnings` 通过**。
+- 接入前修正：serial 匹配失败不得退回 path；只接受有 USB 证据及数字后缀的 tty；删除/查询名称拒绝路径穿越；配置 symlink 与损坏配置不能被静默读取或忽略；规则限定 ttyACM/ttyUSB、保留显式组并拒绝危险值；响应编号和 check 偏差事件正确返回。
+- 新增 `devguardd/src/linux/` 和 Unix 客户端/CLI。仅提供 audit 与配置链路；硬件操作明确拒绝，详细边界及运行方法见 [`linux-shell.md`](linux-shell.md)。
+- 工程师确认三个测试边界：Unix socket 的请求/鉴权/审计/事件、只读 udev/sysfs Inventory、Client/CLI 协议与错误处理。
+- 实际 CLI 验证发现需求示例 `parity = "N"` 被仅接受小写的枚举拒绝。已用 CLI 文件解析最小回归复现，并在共享 `Parity` 增加 `N/E/O` 反序列化别名；保留原小写输出与兼容性。六种大小写输入的回归、原始 CLI 验证及全套测试均通过。
+- `scripts/verify-linux-shell.py --build`：在非 root 私有树启动实际 Linux daemon/CLI，list/save/show/log/doctor/delete/shutdown 等 9 次 CLI 操作及一次私有规则 `udevadm verify` 全部 exit 0，daemon 正常退出并清理自己的 socket。原始产物为本机 `artifacts/linux-cli-2026-11-07.json`（不提交）。
+- 该验证只读枚举到 **0 个 Linux USB 串口**；没有打开串口、reload 主机规则或改写 USB authorized。`udevadm verify` 仅验证语法，**不是 `udevadm test`、真机插拔、桌面 polkit 或 termios 验收**。
+- 在 WSL 项目目录安装/核对 38 个 Matt Pocock skills；`.agents/skills/` 文件齐全，原有 NSH 两项保留。`software-factory` 因上游 YAML 错误跳过；未做全局安装。
 
 ## 本次开发记录（阶段 2，进行中）
 
