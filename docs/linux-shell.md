@@ -79,7 +79,7 @@ WSL 运行后执行此前已确认的 `usbipd attach --wsl --busid 2-3`（1209:0
 - `check` 的 `access: ok` 核对的是真实 devnode 组/模式；symlink/ModemManager/termios 三项 warning 与"规则未激活、阶段 3 未做"一致。
 - `shutdown` 正常退出并清理私有 socket。全程未打开串口、未装主机规则、未 trigger/test、未写 authorized。
 
-原始记录见 `artifacts/linux-real-attach-2026-11-07.md`（不提交）。下一步：真实桌面 Linux（WSL 外）的规则激活与热插拔验收，再补 termios/apply；在门禁通过前继续禁用硬件写入。
+原始记录见 `artifacts/linux-real-attach-2026-11-07.md` 和热插拔续验 `artifacts/linux-real-hotplug-2026-11-07.md`（均不提交）。下一步：真实桌面 Linux（WSL 外）的规则激活与热插拔验收，再补 termios/apply；在门禁通过前继续禁用硬件写入。
 
 ## 项目级 skills
 

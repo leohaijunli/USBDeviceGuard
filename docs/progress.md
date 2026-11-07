@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | 0 NSH spike | Windows 侧完成；Linux 验收被用户暂缓 | 17 项测试 + 7 张原生截图；`scripts/verify-nsh-linux.sh` 待 Arch/Omarchy 执行 |
 | 1 core + 配置 | 完成（软件可测部分） | Windows 28 单元 + 9 集成通过；Linux 另含 1 项 symlink 集成和 5 项 Unix 客户端测试 |
-| 2 daemon + udev | audit/配置 RPC 与 CLI 软件链路通过；WSL 实机只读转接验收通过；桌面规则激活与热插拔未完成 | 纯核心 22 项、Linux Inventory 4 项及 socket RPC 9 项通过；实际 CLI 9 次操作、私有规则 `udevadm verify` 通过；WSL 实机转接后枚举 0→1，learn/save/check/doctor/规则匹配键对实机验证通过（`artifacts/linux-real-attach-2026-11-07.md`）；`apply`、规则安装到主机及热插拔门禁仍未完成 |
+| 2 daemon + udev | audit/配置 RPC 与 CLI 软件链路通过；WSL 实机只读转接与热插拔事件验收通过；桌面规则激活与物理插拔未完成 | 纯核心 22 项、Linux Inventory 4 项及 socket RPC 9 项通过；实际 CLI 9 次操作、私有规则 `udevadm verify` 通过；WSL 实机转接后枚举 0→1，learn/save/check/doctor/规则匹配键对实机验证通过，detach/attach 真实 udev 事件（remove/added）闭环通过（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`）；`apply`、规则安装到主机及桌面物理插拔门禁仍未完成 |
 | 3 termios/check/run | 未开始 | 需要 Linux pty 与真机 |
 | 4 事件/polkit/systemd | 未开始 | 需要 Linux system bus、polkit agent、systemd |
 | 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境 |
@@ -69,6 +69,14 @@
 - 保存后 `list` 显示 registered: 1、状态 Drift；`check` 的 `access: ok` 是对真实 devnode 组/模式的核对，其余 warning（symlink、ModemManager 标记、termios/autosuspend）均为"规则未激活/阶段 3 未做"的正确门禁表现。`show`/`log` 完整，`shutdown` 正常退出并清理私有 socket。
 - 全程未打开串口、未安装主机规则、未 `udevadm trigger`/`test`、未写 `authorized`/power、无固件操作。原始记录：`artifacts/linux-real-attach-2026-11-07.md`（不提交）。
 - 仍待验收：真实桌面 Linux（WSL 外）的规则激活与热插拔、阶段 3 termios、enforce I/O 拒阻真机验证。`usbipd detach --busid 2-3` 可把 COM4 还给 Windows。
+
+### 真机热插拔事件流验收（2026-11-07 续）
+
+- WSL 重启后复测：沙箱配置跨重启保留，重启后的 daemon 对遗留 socket（上轮 daemon 被 WSL 硬杀）按设计拒绝启动；双重确认无监听后手动清理，`list` 显示设备经 **serial 绑定自动重新登记**（registered: 1），未依赖物理路径。
+- Windows 侧 BUSID 因重新枚举从 `2-3` 变为 `1-3`，串行号绑定不受影响——与"绑定用序列号而非端口"的设计一致。
+- 真实 udev 事件闭环：`usbipd detach` → watch 收到 `device_removed`（seq 1，按登记设备名报告）；`usbipd attach` → `device_added`（seq 2，完整 facts 含复合接口标志、`managed_by`、`binding=serial`、三条预期 note）；复插后 `list` 正常。事件连续、版本化，journal 带 `source=udev_monitor` 与 udev_seq。
+- `shutdown` 正常退出，journal `service_stopping` 记录 `blocked_devices: []`。全程只读。原始记录：`artifacts/linux-real-hotplug-2026-11-07.md`（不提交）。
+- 说明：这是 WSL 内 usbipd detach/attach 产生的**真实 udev 事件**，但仍不等同桌面 Linux 物理插拔验收。
 
 - 工程师取消固件刷写，要求继续 `USBDeviceGuard`；本轮没有串口打开、固件写入、USB 转接/反授权、系统规则安装或服务配置变更。
 - 当前主机是 Windows `LMX`，仓库位于 `C:\Users\leeli\Downloads\USBDeviceGuard`。开始时 `main` 工作树干净，HEAD 为 `5d4dd01`。
