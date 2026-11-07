@@ -1,5 +1,6 @@
-use nsh_core::prelude::*;
+use nsh_core::{prelude::*, time::now};
 
+use super::arrivals::Arrivals;
 use super::types::{HardwareEvent, UsbSerialDevice, UsbSnapshot};
 
 /// Read-only device facts. This store never calls devguard's modify protocol.
@@ -10,6 +11,8 @@ pub(crate) struct HardwareStore {
     loading: Signal<bool>,
     watching: Signal<bool>,
     enabled: bool,
+    arrivals: Stored<Arrivals>,
+    pending_notices: Signal<Vec<UsbSerialDevice>>,
 }
 
 impl HardwareStore {
@@ -19,6 +22,8 @@ impl HardwareStore {
             error: signal(None),
             loading: signal(enabled),
             watching: signal(false),
+            arrivals: stored(Arrivals::default()),
+            pending_notices: signal(Vec::new()),
             enabled,
         };
         if enabled {
@@ -26,13 +31,16 @@ impl HardwareStore {
             {
                 effect(move || {
                     let (sender, mut receiver) = tokio::sync::mpsc::channel::<HardwareEvent>(8);
-                    if let Err(error) = super::windows::spawn_watch(sender) {
-                        store.receive(HardwareEvent::Error {
-                            message: format!(
-                                "Could not start USB detection: {error}. Use Refresh to retry."
-                            ),
-                        });
-                        return;
+                    match super::windows::spawn_watch(sender) {
+                        Ok(watcher) => cleanup(move || drop(watcher)),
+                        Err(error) => {
+                            store.receive(HardwareEvent::Error {
+                                message: format!(
+                                    "Could not start USB detection: {error}. Use Refresh to retry."
+                                ),
+                            });
+                            return;
+                        }
                     }
                     spawn(async move {
                         while let Some(event) = receiver.recv().await {
@@ -90,7 +98,7 @@ impl HardwareStore {
                 snapshot
                     .devices
                     .iter()
-                    .find(|device| device.instance_id == instance)
+                    .find(|device| device.instance_id.eq_ignore_ascii_case(instance))
                     .cloned()
             })
         })
@@ -110,6 +118,16 @@ impl HardwareStore {
                 })
                 .unwrap_or_default()
         })
+    }
+
+    /// The newly appeared USB serial devices not yet announced, oldest first.
+    /// Consuming clears them, so a toast host can announce each exactly once.
+    pub(crate) fn take_new_devices(self) -> Vec<UsbSerialDevice> {
+        let devices = self.pending_notices.get();
+        if !devices.is_empty() {
+            self.pending_notices.set(Vec::new());
+        }
+        devices
     }
 
     pub(crate) fn updated_label(self) -> SharedString {
@@ -169,6 +187,14 @@ impl HardwareStore {
         match event {
             HardwareEvent::Snapshot { snapshot } => batch(|| {
                 self.watching.set(snapshot.automatic_updates);
+                let due = self
+                    .arrivals
+                    .with(|arrivals| arrivals.observe(&snapshot.devices, now()));
+                if !due.is_empty() {
+                    let mut pending = self.pending_notices.get_untracked();
+                    pending.extend(due);
+                    self.pending_notices.set(pending);
+                }
                 self.snapshot.set(Some(snapshot));
                 self.error.set(None);
                 self.loading.set(false);
@@ -183,3 +209,7 @@ impl HardwareStore {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

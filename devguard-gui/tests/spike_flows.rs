@@ -180,6 +180,22 @@ fn virtualized_rows_show_their_current_item_after_scrolling_and_filtering() -> R
 }
 
 #[test]
+fn minimum_window_keeps_the_page_whole_and_its_own_scroll_views_usable() -> Result<(), String> {
+    // The host clamps its window to 900x700 logical points; at that size the
+    // page area must still show its fixed rows and scroll only where it must.
+    let mut app = start(900.0)?;
+    app.set_viewport(Size::new(Points(900.0), Points(700.0)))?;
+    app.wait_for("role:tab[Validation guide]")?;
+    app.press("role:tab[Validation guide]")?;
+    app.wait_for("text:NSH local validation")?;
+    // The guide scrolls inside the page area, not the page as a whole.
+    app.scroll("text:NSH local validation", Points(10_000.0))?;
+    app.wait_for("role:button[Send 1,000 records]")?;
+    assert!(app.shows("Waiting for a local validation event"));
+    Ok(())
+}
+
+#[test]
 fn pause_dialog_is_cancellable_and_countdown_expires_on_monotonic_time() -> Result<(), String> {
     let mut app = start(1120.0)?;
     app.press("role:button[Pause preview…]")?;

@@ -25,15 +25,42 @@ fn diagnostics_enabled() -> bool {
 }
 
 pub(crate) fn shell() -> View {
+    shell_with_hardware(HardwareStore::new(diagnostics_enabled()))
+}
+
+pub(crate) fn shell_with_hardware(hardware: HardwareStore) -> View {
     let store = SpikeStore::new();
     let preview = PausePreview::new();
-    let hardware = HardwareStore::new(diagnostics_enabled());
     let section = signal(Section::Devices);
     let open = signal(None::<OpenDialog>);
     let search = element_ref();
     let device_search = element_ref();
     let add_button = element_ref();
     let pause_button = element_ref();
+    let focus_device = signal(None::<String>);
+    let window_visible = signal(true);
+    #[cfg(target_os = "windows")]
+    if let Some(mut events) = crate::desktop_notifications::take_events() {
+        spawn(async move {
+            while let Some(event) = events.recv().await {
+                match event {
+                    crate::desktop_notifications::DesktopEvent::Visible(visible) => {
+                        window_visible.set(visible)
+                    }
+                    crate::desktop_notifications::DesktopEvent::OpenDevice(id) => {
+                        if hardware.device(&id).is_some() {
+                            batch(|| {
+                                section.set(Section::Devices);
+                                focus_device.set(Some(id));
+                            });
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let blocked = move || open.get().is_some();
+    let toast = ui::toast::ToastHost::new(hardware, blocked, move || window_visible.get());
     let focus_search = move |_: &str| {
         if open.get_untracked().is_none() {
             section.set(Section::Devices);
@@ -50,13 +77,14 @@ pub(crate) fn shell() -> View {
     });
 
     view()
+        .relative()
         .flex_1()
         .min_h_0()
         .min_w_0()
         .child(
             view()
-                .px_6()
-                .py_4()
+                .px_4()
+                .py_3()
                 .flex_row()
                 .flex_wrap()
                 .items_center()
@@ -65,13 +93,7 @@ pub(crate) fn shell() -> View {
                     view()
                         .flex_1()
                         .min_w_48()
-                        .gap_1()
-                        .child(
-                            text("devguard")
-                                .text_2xl()
-                                .font_weight(FontWeight::SEMIBOLD),
-                        )
-                        .child(ui::hint("Device management, made clear")),
+                        .child(text("devguard").text_lg().font_weight(FontWeight::SEMIBOLD)),
                 )
                 .child(ui::badge("Phase 0 · UI validation", Tone::Neutral))
                 .child(ui::action(
@@ -94,8 +116,8 @@ pub(crate) fn shell() -> View {
         )
         .child(
             view()
-                .px_6()
-                .py_3()
+                .px_4()
+                .py_2()
                 .flex_row()
                 .flex_wrap()
                 .items_center()
@@ -133,53 +155,60 @@ pub(crate) fn shell() -> View {
                 )),
         )
         .child(
-            view()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .p_6()
-                .gap_4()
-                .child(
-                    tabs()
-                        .flex_row()
-                        .self_start()
-                        .gap_1()
-                        .p_1()
-                        .rounded(move || theme().radius)
-                        .bg(move || theme().muted)
-                        .child(ui::section_tab(
-                            "Devices",
-                            move || section.get() == Section::Devices,
-                            move || section.set(Section::Devices),
-                        ))
-                        .child(ui::section_tab(
-                            "Records",
-                            move || section.get() == Section::Records,
-                            move || section.set(Section::Records),
-                        ))
-                        .child(ui::section_tab(
-                            "Validation guide",
-                            move || section.get() == Section::Guide,
-                            move || section.set(Section::Guide),
-                        )),
-                )
-                .child(
-                    pages::devices(hardware, device_search)
-                        .style_when(move || section.get() != Section::Devices, |s| s.hidden()),
-                )
-                .child(
-                    pages::records(store, open, search, add_button)
-                        .style_when(move || section.get() != Section::Records, |s| s.hidden()),
-                )
-                .child(
-                    pages::guide(store, move || section.set(Section::Records))
-                        .style_when(move || section.get() != Section::Guide, |s| s.hidden()),
-                ),
+            // The page area scrolls as a whole only when the window is shorter
+            // than its content; at a normal size the child fills the viewport,
+            // so the lists keep their own bounded scrolling. The padding sits
+            // on the child: a scroll view's own padding is counted again past
+            // its built-in bar, which would make the page scroll a few points
+            // at every size.
+            scroll().flex_1().min_h_0().min_w_0().child(
+                view()
+                    .min_h(Length::from(relative(1.0)))
+                    .min_w_0()
+                    .p_4()
+                    .gap_3()
+                    .child(
+                        tabs()
+                            .flex_row()
+                            .self_start()
+                            .gap_1()
+                            .p_1()
+                            .rounded(move || theme().radius)
+                            .bg(move || theme().muted)
+                            .child(ui::section_tab(
+                                "Devices",
+                                move || section.get() == Section::Devices,
+                                move || section.set(Section::Devices),
+                            ))
+                            .child(ui::section_tab(
+                                "Records",
+                                move || section.get() == Section::Records,
+                                move || section.set(Section::Records),
+                            ))
+                            .child(ui::section_tab(
+                                "Validation guide",
+                                move || section.get() == Section::Guide,
+                                move || section.set(Section::Guide),
+                            )),
+                    )
+                    .child(
+                        pages::devices(hardware, device_search, focus_device)
+                            .style_when(move || section.get() != Section::Devices, |s| s.hidden()),
+                    )
+                    .child(
+                        pages::records(store, open, search, add_button)
+                            .style_when(move || section.get() != Section::Records, |s| s.hidden()),
+                    )
+                    .child(
+                        pages::guide(store, move || section.set(Section::Records))
+                            .style_when(move || section.get() != Section::Guide, |s| s.hidden()),
+                    ),
+            ),
         )
         .child(
             view()
-                .px_6()
-                .py_3()
+                .px_4()
+                .py_2()
                 .gap_1()
                 .border_t_1()
                 .border_color(move || theme().border)
@@ -204,6 +233,17 @@ pub(crate) fn shell() -> View {
                     },
                 )),
         )
+        .child(ui::toast::layer(
+            toast,
+            hardware,
+            blocked,
+            move |id: String| {
+                batch(|| {
+                    section.set(Section::Devices);
+                    focus_device.set(Some(id));
+                });
+            },
+        ))
         .child(when(
             move || open.get() == Some(OpenDialog::Record),
             move || dialogs::record_form(store, open, add_button),

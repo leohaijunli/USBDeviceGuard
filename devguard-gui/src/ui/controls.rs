@@ -126,7 +126,7 @@ pub(crate) fn list_row(
         .items_center()
         .gap_3()
         .px_3()
-        .py_3()
+        .py_2()
         .min_w_0()
         .rounded(move || theme().radius)
         .bg(move || theme().card)

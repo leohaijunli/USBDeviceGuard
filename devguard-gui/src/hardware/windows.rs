@@ -20,7 +20,9 @@ use tokio::sync::mpsc::Sender;
 use super::types::{HardwareEvent, UsbSnapshot};
 
 const SCRIPT: &str = include_str!("../../assets/windows-usb.ps1");
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(25);
+// Cold Windows PnP/module initialization was measured at 33.78 s. Keep a
+// bounded watchdog, but do not kill a healthy first snapshot at 25 s.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_LINE: usize = 1024 * 1024;
 
 fn command(watch: bool) -> Command {
@@ -128,9 +130,53 @@ impl Guard {
     }
 }
 
-/// The watcher owns the child for as long as the engine reads its channel; a
-/// dropped receiver ends `blocking_send`, and the thread kills the child.
-pub(crate) fn spawn_watch(sender: Sender<HardwareEvent>) -> std::io::Result<()> {
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.finish();
+        self.kill();
+        self.wait();
+    }
+}
+
+#[derive(Default)]
+struct Cancellation {
+    cancelled: bool,
+    child: Option<Arc<Mutex<Child>>>,
+}
+
+/// Dropping the engine owner's handle wakes a blocked stdout reader by killing
+/// its own process. Waiting for another device broadcast would leak the watcher.
+pub(crate) struct Watcher(Arc<Mutex<Cancellation>>);
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        let child = self.0.lock().ok().and_then(|mut state| {
+            state.cancelled = true;
+            state.child.take()
+        });
+        if let Some(child) = child {
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
+            }
+        }
+    }
+}
+
+fn attach_child(cancellation: &Mutex<Cancellation>, guard: &Guard) -> bool {
+    let mut state = cancellation
+        .lock()
+        .expect("watcher cancellation lock poisoned");
+    if state.cancelled {
+        return false;
+    }
+    state.child = Some(guard.child.clone());
+    true
+}
+
+/// The engine owner keeps this cancellation handle alongside its receiver.
+pub(crate) fn spawn_watch(sender: Sender<HardwareEvent>) -> std::io::Result<Watcher> {
+    let cancellation = Arc::new(Mutex::new(Cancellation::default()));
+    let worker = cancellation.clone();
     spawn_thread("devguard-usb-watch", move || {
         let child = match command(true).spawn() {
             Ok(child) => child,
@@ -140,6 +186,9 @@ pub(crate) fn spawn_watch(sender: Sender<HardwareEvent>) -> std::io::Result<()> 
             }
         };
         let guard = Guard::new(child);
+        if !attach_child(&worker, &guard) {
+            return;
+        }
         guard.arm();
         let mut first = true;
         if let Some(reader) = guard.output() {
@@ -175,7 +224,8 @@ pub(crate) fn spawn_watch(sender: Sender<HardwareEvent>) -> std::io::Result<()> 
                 },
             );
         }
-    })
+    })?;
+    Ok(Watcher(cancellation))
 }
 
 /// One-shot scan; the engine receives exactly one event, then stops reading.
@@ -248,4 +298,49 @@ fn decode(line: &str) -> Result<HardwareEvent, String> {
     }
     serde_json::from_str(line)
         .map_err(|error| format!("Invalid USB diagnostic event: {error}. Use Refresh to retry."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn waiting_child() -> Child {
+        use std::os::windows::process::CommandExt;
+        // No PnP/WMI/USB access: just one line followed by a blocked process.
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); Wait-Event | Out-Null",
+            ])
+            .creation_flags(0x08000000)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn owner_drop_stops_a_watcher_without_waiting_for_a_device_change() {
+        let cancellation = Arc::new(Mutex::new(Cancellation::default()));
+        let owner = Watcher(cancellation.clone());
+        let guard = Guard::new(waiting_child());
+        assert!(attach_child(&cancellation, &guard));
+        let mut line = String::new();
+        guard.output().unwrap().read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "ready");
+        drop(owner);
+        assert!(!guard.wait(), "cancelled watcher exited as a normal scan");
+    }
+
+    #[test]
+    fn owner_disposal_before_process_start_prevents_a_late_watcher() {
+        let cancellation = Arc::new(Mutex::new(Cancellation::default()));
+        drop(Watcher(cancellation.clone()));
+        let guard = Guard::new(waiting_child());
+        assert!(!attach_child(&cancellation, &guard));
+        // Guard's drop terminates and reaps the unregistered child.
+    }
 }

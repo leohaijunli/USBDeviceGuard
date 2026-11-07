@@ -23,6 +23,17 @@ pub(crate) fn hint(label: impl IntoReactive<SharedString>) -> Text {
         .text_color(move || theme().muted_foreground)
 }
 
+/// Compact inspector rows share a label column; full values wrap and can be copied.
+pub(crate) fn metadata(label: &'static str, value: impl IntoReactive<SharedString>) -> View {
+    view()
+        .flex_row()
+        .items_start()
+        .min_w_0()
+        .gap_2()
+        .child(hint(label).text_xs().w_24().flex_shrink_0())
+        .child(text(value).text_sm().flex_1().min_w_0().selectable(true))
+}
+
 pub(crate) fn panel() -> View {
     view()
         .min_w_0()

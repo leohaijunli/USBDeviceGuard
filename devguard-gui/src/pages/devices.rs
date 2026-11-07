@@ -9,10 +9,30 @@ use crate::{
     ui::{self, tokens, ActionStyle, Tone},
 };
 
-pub(crate) fn devices(store: HardwareStore, search: ElementRef) -> View {
+pub(crate) fn devices(
+    store: HardwareStore,
+    search: ElementRef,
+    focus_request: Signal<Option<String>>,
+) -> View {
     let query = signal(String::new());
     let picked = signal(None::<String>);
     let detail_open = signal(false);
+    // The toast layer asks to open a specific device's details. Consumed
+    // once, so re-focusing the same device later still moves the selection.
+    effect(move || {
+        if let Some(id) = focus_request.get() {
+            untracked(|| {
+                batch(|| {
+                    if store.device(&id).is_some() {
+                        query.set(String::new());
+                        picked.set(Some(id));
+                        detail_open.set(true);
+                    }
+                    focus_request.set(None);
+                })
+            });
+        }
+    });
     let ids = computed(move || store.ids(&query.get()));
     let selected = computed(move || {
         picked
@@ -24,7 +44,7 @@ pub(crate) fn devices(store: HardwareStore, search: ElementRef) -> View {
     let reset_filter = move || query.set(String::new());
     let scan_enabled = store.scan_enabled();
 
-    view().flex_1().min_h_0().min_w_0().gap_4()
+    view().flex_1().min_h_0().min_w_0().gap_3()
         .child(
             view().flex_row().flex_wrap().items_center().gap_3()
                 .child(view().flex_1().min_w_48().gap_1()
@@ -48,11 +68,11 @@ pub(crate) fn devices(store: HardwareStore, search: ElementRef) -> View {
                     .text_color(move || ui::tokens::color_role("warning")))
         }))
         .child(
-            view().flex_1().min_h_0().min_w_0().flex_row().gap_4()
+            view().flex_1().min_h_0().min_w_0().flex_row().gap_3()
                 .child(
                     ui::panel().flex_1()
                         .style_when(move || !tokens::wide_layout() && detail_open.get(), |s| s.hidden())
-                        .child(view().px_4().py_3().flex_row().items_center().justify_between().gap_3()
+                        .child(view().px_4().py_2().flex_row().items_center().justify_between().gap_3()
                             .child(text("Detected").text_sm().font_weight(FontWeight::SEMIBOLD))
                             .child(ui::hint(move || -> SharedString {
                                 let total = store.count();
@@ -78,7 +98,8 @@ pub(crate) fn devices(store: HardwareStore, search: ElementRef) -> View {
                             .test_id("device-list")
                             .keys(move || ids.get())
                             .estimated_item_size(move || tokens::length("row-estimate") * font_scale())
-                            .content_padding(tokens::space(2.0))
+                            .content_padding_y(tokens::space(2.0))
+                            .content_padding_x(tokens::space(4.0))
                             .row_gap(tokens::space(1.0))
                             .empty(view().p_6().gap_3().child(
                                 when(
@@ -111,17 +132,17 @@ pub(crate) fn devices(store: HardwareStore, search: ElementRef) -> View {
                         .style_when(move || !tokens::wide_layout(), |s| s.flex_1())
                         .style_when(move || !tokens::wide_layout() && !detail_open.get(), |s| s.hidden())
                         .child(
-                            view().px_4().py_3().flex_row().items_center().gap_2()
+                            view().px_4().py_2().flex_row().items_center().gap_2()
                                 .child(text("Device details").text_sm().font_weight(FontWeight::SEMIBOLD).flex_1())
                                 .child(when(move || !tokens::wide_layout(), move || {
                                     ui::action("Back to list", ActionStyle::Quiet, move || detail_open.set(false))
                                 })),
                         )
                         .child(scroll().flex_1().min_h_0().child(
-                            view().p_4().gap_5().child(when(move || current.with(Option::is_some), move || {
+                            view().p_4().gap_4().child(when(move || current.with(Option::is_some), move || {
                                 inspector(current)
                             }).otherwise(|| {
-                                view().gap_4()
+                                view().gap_3()
                                     .child(ui::badge("Read-only", Tone::Neutral))
                                     .child(ui::heading("Select a device"))
                                     .child(ui::hint("Details come from the operating system's device database. Nothing is written to the device."))
@@ -235,13 +256,14 @@ fn row(
 }
 
 fn inspector(current: Memo<Option<crate::hardware::UsbSerialDevice>>) -> View {
-    view().gap_5()
-        .child(when(move || current.with(|device| device.as_ref().is_some_and(|device| !device.healthy())), || {
-            ui::badge("Reported problem", Tone::Warning)
-        }).otherwise(|| ui::badge("Ready", Tone::Success)))
-        .child(ui::heading(move || {
-            current.with(|device| device.as_ref().map(|device| device.name.clone()).unwrap_or_default())
-        }).selectable(true))
+    view().gap_2()
+        .child(view().flex_row().items_center().gap_2()
+            .child(ui::heading(move || {
+                current.with(|device| device.as_ref().map(|device| device.name.clone()).unwrap_or_default())
+            }).selectable(true).flex_1().min_w_0())
+            .child(when(move || current.with(|device| device.as_ref().is_some_and(|device| !device.healthy())), || {
+                ui::badge("Reported problem", Tone::Warning).self_center()
+            }).otherwise(|| ui::badge("Ready", Tone::Success).self_center())))
         .child(when(move || current.with(|device| device.as_ref().is_some_and(|device| device.composite_parent)), || {
             ui::hint("Composite USB parent: blocking this device would affect its other interfaces. The daemon must check every interface first.")
         }))
@@ -263,7 +285,7 @@ fn inspector(current: Memo<Option<crate::hardware::UsbSerialDevice>>) -> View {
             }).unwrap_or_default()
         })))
         .child(metadata("Instance ID", move || current.with(|device| device.as_ref().map(|device| device.instance_id.clone()).unwrap_or_default())))
-        .child(view().pt_4().gap_3().border_t_1().border_color(move || theme().border)
+        .child(view().pt_3().gap_2().border_t_1().border_color(move || theme().border)
             .child(text("Binding notes").text_sm().font_weight(FontWeight::MEDIUM))
             .child(ui::hint("A serial candidate from the USB parent still needs confirmation as ID_SERIAL_SHORT on Linux. The instance tail of a composite interface is never used as a serial number."))
             .child(metadata("USB parent", move || current.with(|device| device.as_ref().map(|device| device.usb_instance_id.clone()).unwrap_or_default()))))
@@ -282,9 +304,5 @@ fn inspector(current: Memo<Option<crate::hardware::UsbSerialDevice>>) -> View {
 }
 
 fn metadata(label: &'static str, value: impl Fn() -> String + 'static) -> View {
-    view().gap_1().child(ui::hint(label).text_xs()).child(
-        text(move || SharedString::from(value()))
-            .text_sm()
-            .selectable(true),
-    )
+    ui::metadata(label, move || SharedString::from(value()))
 }

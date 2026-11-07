@@ -9,6 +9,11 @@ mod shell;
 mod spike;
 mod ui;
 
+#[cfg(target_os = "windows")]
+mod desktop_notifications;
+#[cfg(target_os = "windows")]
+pub mod desktop_windows;
+
 use nsh_base::theme;
 use nsh_core::prelude::*;
 

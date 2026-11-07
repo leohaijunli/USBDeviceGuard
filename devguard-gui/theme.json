@@ -6,7 +6,8 @@
       "dialog-width": "560px",
       "inspector-width": "352px",
       "two-pane-breakpoint": "960px",
-      "row-estimate": "76px",
+      "row-estimate": "56px",
+      "notice-width": "384px",
       "focus-width": "2px"
     },
     "light": {

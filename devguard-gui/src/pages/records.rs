@@ -40,7 +40,7 @@ pub(crate) fn records(
         after_answer(move || list.scroll_to_offset(tokens::space(0.0), false));
     });
 
-    view().flex_1().min_h_0().min_w_0().gap_4()
+    view().flex_1().min_h_0().min_w_0().gap_3()
         .child(
             view().flex_row().flex_wrap().items_center().gap_3()
                 .child(view().flex_1().min_w_48().gap_1()
@@ -62,11 +62,11 @@ pub(crate) fn records(
                     .child(ui::section_tab("Form", move || origin.get() == Some(Origin::Form), move || origin.set(Some(Origin::Form))))),
         )
         .child(
-            view().flex_1().min_h_0().min_w_0().flex_row().gap_4()
+            view().flex_1().min_h_0().min_w_0().flex_row().gap_3()
                 .child(
                     ui::panel().flex_1()
                         .style_when(move || !tokens::wide_layout() && detail_open.get(), |s| s.hidden())
-                        .child(view().px_4().py_3().flex_row().items_center().justify_between().gap_3()
+                        .child(view().px_4().py_2().flex_row().items_center().justify_between().gap_3()
                             .child(text("Received records").text_sm().font_weight(FontWeight::SEMIBOLD))
                             .child(ui::hint(move || format!("{} / {} records", visible.with(Vec::len), store.count())).tabular_nums()))
                         .child(
@@ -83,7 +83,8 @@ pub(crate) fn records(
                             .element_ref(&list)
                             .keys(move || visible.get())
                             .estimated_item_size(move || tokens::length("row-estimate") * font_scale())
-                            .content_padding(tokens::space(2.0))
+                            .content_padding_y(tokens::space(2.0))
+                            .content_padding_x(tokens::space(4.0))
                             .row_gap(tokens::space(1.0))
                             .empty(
                                 view().p_6().gap_3()
@@ -113,17 +114,17 @@ pub(crate) fn records(
                         .style_when(move || !tokens::wide_layout(), |s| s.flex_1())
                         .style_when(move || !tokens::wide_layout() && !detail_open.get(), |s| s.hidden())
                         .child(
-                            view().px_4().py_3().flex_row().items_center().gap_2()
+                            view().px_4().py_2().flex_row().items_center().gap_2()
                                 .child(text("Record details").text_sm().font_weight(FontWeight::SEMIBOLD).flex_1())
                                 .child(when(move || !tokens::wide_layout(), move || {
                                     ui::action("Back to list", ActionStyle::Quiet, move || detail_open.set(false))
                                 })),
                         )
                         .child(scroll().flex_1().min_h_0().child(
-                            view().p_4().gap_5().child(when(move || current.with(Option::is_some), move || {
+                            view().p_4().gap_4().child(when(move || current.with(Option::is_some), move || {
                                 inspector(current, visible)
                             }).otherwise(|| {
-                                view().gap_4()
+                                view().gap_3()
                                     .child(ui::badge("One workspace", Tone::Neutral))
                                     .child(ui::heading("Select a record"))
                                     .child(ui::hint("See its full note, event source and thread details here. Smaller windows use a single-pane view."))
@@ -216,7 +217,7 @@ fn row(
 
 fn inspector(current: Memo<Option<Record>>, visible: Memo<Vec<u64>>) -> View {
     view()
-        .gap_5()
+        .gap_2()
         .child(ui::badge("Local validation event", Tone::Neutral))
         .child(
             ui::heading(move || {
@@ -257,7 +258,7 @@ fn inspector(current: Memo<Option<Record>>, visible: Memo<Vec<u64>>) -> View {
                     .unwrap_or_default()
             })
         }))
-        .child(metadata("Note", move || {
+        .child(note(move || {
             current.with(|record| {
                 record
                     .as_ref()
@@ -273,8 +274,8 @@ fn inspector(current: Memo<Option<Record>>, visible: Memo<Vec<u64>>) -> View {
         }))
         .child(
             view()
-                .pt_4()
-                .gap_3()
+                .pt_3()
+                .gap_2()
                 .border_t_1()
                 .border_color(move || theme().border)
                 .child(
@@ -332,8 +333,12 @@ fn inspector(current: Memo<Option<Record>>, visible: Memo<Vec<u64>>) -> View {
 }
 
 fn metadata(label: &'static str, value: impl Fn() -> SharedString + 'static) -> View {
+    ui::metadata(label, value)
+}
+
+fn note(value: impl Fn() -> SharedString + 'static) -> View {
     view()
         .gap_1()
-        .child(ui::hint(label).text_xs())
+        .child(ui::hint("Note").text_xs())
         .child(text(value).text_sm().selectable(true))
 }

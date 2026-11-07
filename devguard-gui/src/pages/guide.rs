@@ -9,7 +9,7 @@ use crate::{
 pub(crate) fn guide(store: SpikeStore, show_records: impl Fn() + Copy + 'static) -> View {
     ui::panel().flex_1()
         .child(scroll().flex_1().child(
-            view().p_6().gap_6()
+            view().p_5().gap_5()
                 .child(view().gap_2().child(ui::heading("NSH local validation"))
                     .child(ui::hint("Test native controls and background event delivery. USB management will be connected in later phases.")))
                 .child(item("Lists and search", "Filter by name, note or ID. Select a record to see its details in the same workspace."))
@@ -31,7 +31,7 @@ pub(crate) fn guide(store: SpikeStore, show_records: impl Fn() + Copy + 'static)
 
 fn item(title: &'static str, detail: &'static str) -> View {
     view()
-        .gap_2()
+        .gap_1()
         .child(text(title).text_sm().font_weight(FontWeight::SEMIBOLD))
         .child(ui::hint(detail))
 }

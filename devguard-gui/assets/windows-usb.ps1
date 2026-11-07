@@ -3,20 +3,35 @@ param([switch]$Watch)
 # Read-only development diagnostics. Never opens a serial port or writes PnP settings.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$script:deviceProperties = @{}
 
 function Read-Property([string]$instance, [string]$key) {
-    $properties = @(Get-PnpDeviceProperty -InstanceId $instance -KeyName $key -ErrorAction SilentlyContinue |
-        Where-Object { $null -ne $_.PSObject.Properties['Data'] })
-    if ($properties.Count -gt 0) { return $properties[0].Data }
+    if (-not $script:deviceProperties.ContainsKey($instance)) {
+        $values = @{}
+        $properties = @(Get-PnpDeviceProperty -InstanceId $instance -ErrorAction SilentlyContinue |
+            Where-Object { $null -ne $_.PSObject.Properties['Data'] })
+        foreach ($property in $properties) { $values[[string]$property.KeyName] = $property.Data }
+        $script:deviceProperties[$instance] = $values
+    }
+    $values = $script:deviceProperties[$instance]
+    if ($values.ContainsKey($key)) { return $values[$key] }
     return $null
 }
 
 function Read-Snapshot([bool]$automatic) {
+    # Fresh per snapshot; one property query per instance, not per field.
+    $script:deviceProperties = @{}
     $devices = @()
     $ignored = @()
-    $present = @(Get-PnpDevice -PresentOnly | Select-Object -ExpandProperty InstanceId)
+    $present = @(Get-PnpDevice -PresentOnly -Class Ports | Select-Object -ExpandProperty InstanceId)
     foreach ($port in Get-CimInstance Win32_SerialPort | Sort-Object DeviceID) {
+        # Bluetooth virtual COM ports must not inherit USB identity from their radio.
+        if ($port.PNPDeviceID -notmatch '^USB\\VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}') {
+            $ignored += [string]$port.DeviceID
+            continue
+        }
         if ($present -notcontains $port.PNPDeviceID) { continue }
         $cursor = [string]$port.PNPDeviceID
         $chain = @()
@@ -88,7 +103,11 @@ try {
     if ($Watch) {
         try {
             # Subscribe before enumerating to avoid losing a change during startup.
-            $subscription = Register-WmiEvent -Class Win32_DeviceChangeEvent -SourceIdentifier $source
+            # Without -Action, Register-WmiEvent can return no object even
+            # though the subscription is live. Inspect the registered listener.
+            Register-WmiEvent -Class Win32_DeviceChangeEvent -SourceIdentifier $source | Out-Null
+            $subscription = Get-EventSubscriber -SourceIdentifier $source -ErrorAction Stop
+            if ($null -eq $subscription) { throw 'Device-change subscription was not registered' }
         } catch {
             $watchError = $_.Exception.Message
         }
