@@ -19,6 +19,8 @@ use crate::policy::{PauseKind, PolicyMode, ServiceState, StartupReconcile};
 use crate::util::now_rfc3339;
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Operator {
@@ -35,7 +37,8 @@ impl Operator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("{code}: {message}")]
 #[serde(deny_unknown_fields)]
 pub struct ProtocolError {
     pub code: String,

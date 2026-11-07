@@ -12,6 +12,9 @@ pub mod protocol;
 pub mod store;
 pub mod util;
 
+#[cfg(unix)]
+pub mod client;
+
 pub use check::{CheckItem, CheckReport, Severity};
 pub use config::{
     AccessConfig, BaudRate, DeviceConfig, DeviceId, DeviceKind, FlowControl, IdRole, Parity,

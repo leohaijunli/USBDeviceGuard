@@ -70,8 +70,11 @@ impl DeviceKind {
 #[serde(rename_all = "lowercase")]
 pub enum Parity {
     #[default]
+    #[serde(alias = "N")]
     N,
+    #[serde(alias = "E")]
     E,
+    #[serde(alias = "O")]
     O,
 }
 

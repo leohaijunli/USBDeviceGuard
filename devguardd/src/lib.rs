@@ -7,3 +7,6 @@ pub mod rules;
 
 pub mod core;
 pub use core::{BlockedDevice, Caller, Daemon, Effect, Handled};
+
+#[cfg(target_os = "linux")]
+pub mod linux;

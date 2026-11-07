@@ -145,11 +145,19 @@ impl UdevFacts {
     /// Enforce must never touch keyboards, mice, hubs or storage: only tty
     /// devices named ttyUSB* / ttyACM* are candidates.
     pub fn is_managed_tty(&self) -> bool {
-        if self.subsystem != "tty" {
+        if self.subsystem != "tty"
+            || !self.is_usb
+            || crate::util::normalize_hex4(&self.vid).is_err()
+            || crate::util::normalize_hex4(&self.pid).is_err()
+        {
             return false;
         }
-        let name = self.kernel_name();
-        name.starts_with("ttyUSB") || name.starts_with("ttyACM")
+        let Some(name) = self.devnode.strip_prefix("/dev/") else {
+            return false;
+        };
+        name.strip_prefix("ttyUSB")
+            .or_else(|| name.strip_prefix("ttyACM"))
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
     }
 
     pub fn to_online(&self) -> OnlineDevice {
@@ -241,6 +249,7 @@ pub fn match_quality<'a>(
             if facts.serial_short.as_deref().map(str::trim) == Some(serial.trim()) {
                 return Some((Binding::Serial, id));
             }
+            continue;
         }
         if let Some(path) = &id.path {
             if facts.id_path.as_deref() == Some(path.as_str()) {
@@ -312,6 +321,32 @@ mod tests {
     fn serial_must_match() {
         let facts = facts("26ac", "0032", Some("OTHER"), None);
         assert!(match_quality(&config(), &facts).is_none());
+    }
+
+    #[test]
+    fn a_serial_binding_never_falls_back_to_a_matching_port() {
+        let mut config = config();
+        config.ids[0].path = Some("pci-port-1".into());
+        let facts = facts("26ac", "0032", Some("OTHER"), Some("pci-port-1"));
+        assert!(match_quality(&config, &facts).is_none());
+    }
+
+    #[test]
+    fn managed_tty_requires_usb_evidence_and_a_numeric_kernel_suffix() {
+        let mut facts = facts("26ac", "0032", Some("ABC"), None);
+        facts.is_usb = false;
+        assert!(!facts.is_managed_tty());
+        facts.is_usb = true;
+        for name in ["ttyACM", "ttyUSBfake", "ttyUSB0/../hidraw0", "ttyS0"] {
+            facts.devnode = format!("/dev/{name}");
+            assert!(!facts.is_managed_tty(), "{name}");
+        }
+        for name in ["ttyACM0", "ttyUSB12"] {
+            facts.devnode = format!("/dev/{name}");
+            assert!(facts.is_managed_tty(), "{name}");
+        }
+        facts.vid.clear();
+        assert!(!facts.is_managed_tty());
     }
 
     #[test]

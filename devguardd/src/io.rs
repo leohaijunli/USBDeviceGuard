@@ -1,7 +1,7 @@
 //! The device I/O seam.  The daemon's decision logic (`core`) only talks to
 //! this trait, so the state machine runs — and is tested — without Linux.
-//! The real implementation lives in `linux_io` and does udevadm/sysfs/termios
-//! work; it is verified on the target system.
+//! The phase-2 implementation is `linux::LinuxIo`; it reads udev/sysfs and
+//! stages rules. Hardware writes remain unavailable until their gates pass.
 
 use devguard_core::{CheckReport, DeviceConfig, DoctorItem, UdevFacts};
 
@@ -12,11 +12,12 @@ pub struct ApplyOutcome {
 }
 
 pub trait DeviceIo {
-    /// All USB serial devices currently visible, with udev facts.
-    fn enumerate(&self) -> Vec<UdevFacts>;
+    /// All USB serial devices currently visible, with udev facts. Failure is
+    /// not an empty bus: callers must surface enumeration errors.
+    fn enumerate(&self) -> Result<Vec<UdevFacts>, String>;
 
     /// Facts for one devnode, if it is present.
-    fn facts_for_devnode(&self, devnode: &str) -> Option<UdevFacts>;
+    fn facts_for_devnode(&self, devnode: &str) -> Result<Option<UdevFacts>, String>;
 
     /// Apply one configuration to the device the facts describe: symlink
     /// presence, group/mode, ModemManager ignore, autosuspend, termios and

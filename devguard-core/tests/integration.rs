@@ -164,6 +164,57 @@ fn store_rejects_invalid_names_and_missing_bindings() {
 }
 
 #[test]
+fn store_get_and_delete_reject_path_traversal_before_touching_files() {
+    let dir = TempDir::new().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+    let outside = paths.etc.join("outside.toml");
+    fs::write(&outside, "must not be read, backed up or deleted").unwrap();
+    let store = DeviceStore::new(paths);
+
+    for name in ["../outside", "", "-bad", "UPPER", "a/b"] {
+        assert!(matches!(store.get(name), Err(StoreError::InvalidName(_))));
+        assert!(matches!(store.delete(name), Err(StoreError::InvalidName(_))));
+    }
+    assert_eq!(fs::read_to_string(outside).unwrap(), "must not be read, backed up or deleted");
+}
+
+#[test]
+fn a_broken_configuration_is_not_silently_ignored_when_saving() {
+    let dir = TempDir::new().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+    fs::write(paths.device_file("broken"), "invalid TOML {").unwrap();
+    let store = DeviceStore::new(paths.clone());
+
+    assert!(store.save(&px4("px4-main", "26ac", "0032", "SN-1"), None).is_err());
+    assert!(!paths.device_file("px4-main").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn configuration_symlinks_are_not_read_backed_up_or_deleted() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+    let outside = dir.path().join("outside.toml");
+    let config = px4("px4-main", "26ac", "0032", "SN-1");
+    fs::write(&outside, config.to_toml().unwrap()).unwrap();
+    symlink(&outside, paths.device_file("px4-main")).unwrap();
+    let store = DeviceStore::new(paths.clone());
+
+    let loaded = store.load().unwrap();
+    assert!(loaded.devices.is_empty());
+    assert_eq!(loaded.errors.len(), 1);
+    assert!(store.save(&config, None).is_err());
+    assert!(store.delete("px4-main").is_err());
+    assert!(fs::symlink_metadata(paths.device_file("px4-main")).unwrap().file_type().is_symlink());
+    assert!(outside.exists());
+}
+
+#[test]
 fn journal_append_query_and_export() {
     let dir = TempDir::new().unwrap();
     let journal = Journal::at(dir.path().join("journal.jsonl"));

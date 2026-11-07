@@ -32,7 +32,8 @@ pub struct Caller {
     pub user: String,
     /// Supplementary groups of the caller's process.
     pub groups: Vec<u32>,
-    /// `true` after a successful polkit check for this request.
+    /// A trusted authorization decision: polkit in system mode, or the
+    /// verified same-uid owner of an isolated development sandbox.
     pub polkit_authorized: bool,
 }
 
@@ -163,7 +164,7 @@ impl Daemon {
 
     /// Read requests: any devguard group member (or root).  Everything else
     /// needs a positive polkit decision (root qualifies implicitly).
-    fn authorize(&self, caller: &Caller, request: &Request) -> Result<(), ProtocolError> {
+    pub(crate) fn authorize(&self, caller: &Caller, request: &Request) -> Result<(), ProtocolError> {
         if request.is_read_only() {
             if caller.is_root() || self.in_devguard_group(caller) {
                 return Ok(());
@@ -210,8 +211,8 @@ impl Daemon {
                     .operator(caller.uid, &caller.user),
             );
         }
-        match request {
-            Request::List => self.handle_list(io),
+        let mut handled = match request {
+            Request::List => self.handle_list(io, id),
             Request::Show { name } => self.handle_show(io, id, &name),
             Request::LearnCandidate { devnode } => self.handle_learn(io, id, &devnode),
             Request::SaveDevice { config, note } => self.handle_save(io, caller, id, config, note),
@@ -242,14 +243,16 @@ impl Daemon {
             Request::AllowDevice { devnode, note } => {
                 self.handle_allow(io, caller, id, &devnode, note)
             }
-        }
+        };
+        handled.response.id = id;
+        handled
     }
 
     // --- queries ----------------------------------------------------------
 
-    fn online_with_status(&mut self, io: &mut dyn DeviceIo) -> Vec<OnlineDevice> {
-        let facts = io.enumerate();
-        self.online_from_facts(facts, io)
+    pub(crate) fn online_with_status(&mut self, io: &mut dyn DeviceIo) -> Result<Vec<OnlineDevice>, String> {
+        let facts = io.enumerate()?;
+        Ok(self.online_from_facts(facts, io))
     }
 
     fn online_from_facts(&mut self, facts: Vec<UdevFacts>, io: &mut dyn DeviceIo) -> Vec<OnlineDevice> {
@@ -314,8 +317,11 @@ impl Daemon {
         online
     }
 
-    fn handle_list(&mut self, io: &mut dyn DeviceIo) -> Handled {
-        let online = self.online_with_status(io);
+    fn handle_list(&mut self, io: &mut dyn DeviceIo, id: Option<u64>) -> Handled {
+        let online = match self.online_with_status(io) {
+            Ok(online) => online,
+            Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+        };
         let loaded = self.store().load().unwrap_or_default();
         let problems = loaded
             .errors
@@ -375,7 +381,10 @@ impl Daemon {
             Ok(text) => text,
             Err(error) => return Handled::err(id, ProtocolError::internal(format!("{error}"))),
         };
-        let facts = io.enumerate();
+        let facts = match io.enumerate() {
+            Ok(facts) => facts,
+            Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+        };
         let online = self.online_from_facts(facts.clone(), io);
         let mine: Vec<OnlineDevice> = online
             .iter()
@@ -417,7 +426,11 @@ impl Daemon {
     }
 
     fn handle_learn(&mut self, io: &mut dyn DeviceIo, id: Option<u64>, devnode: &str) -> Handled {
-        let Some(facts) = io.facts_for_devnode(devnode) else {
+        let facts = match io.facts_for_devnode(devnode) {
+            Ok(facts) => facts,
+            Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+        };
+        let Some(facts) = facts else {
             return Handled::err(
                 id,
                 ProtocolError::not_found(
@@ -478,13 +491,14 @@ impl Daemon {
                     name: outcome.config.name.clone(),
                     before,
                     after: Some(outcome.config.clone()),
-                    note,
+                    note: note.clone(),
                     operator: self.operator(caller),
                 })
                 .journal(
                     JournalEntry::new("config_changed")
                         .name(&outcome.config.name)
                         .operator(caller.uid, &caller.user)
+                        .details(serde_json::json!({ "note": note }))
                         .change(
                             before_toml.unwrap_or_default(),
                             after_toml.unwrap_or_default(),
@@ -508,6 +522,7 @@ impl Daemon {
         note: Option<String>,
     ) -> Handled {
         let before = self.store().get(name).ok();
+        let before_toml = before.as_ref().and_then(|config| config.to_toml().ok());
         match self.store().delete(name) {
             Ok(backup) => Handled::ok(
                 id,
@@ -520,14 +535,15 @@ impl Daemon {
                 name: name.to_owned(),
                 before,
                 after: None,
-                note,
+                note: note.clone(),
                 operator: self.operator(caller),
             })
             .journal(
                 JournalEntry::new("config_changed")
                     .name(name)
                     .operator(caller.uid, &caller.user)
-                    .details(serde_json::json!({ "deleted": true })),
+                    .details(serde_json::json!({ "deleted": true, "note": note }))
+                    .change(before_toml.unwrap_or_default(), ""),
             )
             .effect(Effect::WriteRules),
             Err(error) => Handled::err(
@@ -567,14 +583,20 @@ impl Daemon {
                         ),
                     );
                 };
-                let facts = io
-                    .enumerate()
-                    .into_iter()
+                let devices = match io.enumerate() {
+                    Ok(devices) => devices,
+                    Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+                };
+                let facts = devices.into_iter()
                     .find(|fact| match_quality(&config, fact).is_some());
                 (config, facts)
             }
             (None, Some(devnode)) => {
-                let Some(fact) = io.facts_for_devnode(&devnode) else {
+                let fact = match io.facts_for_devnode(&devnode) {
+                    Ok(fact) => fact,
+                    Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+                };
+                let Some(fact) = fact else {
                     return Handled::err(
                         id,
                         ProtocolError::not_found(
@@ -661,7 +683,10 @@ impl Daemon {
             },
             None => loaded.devices.clone(),
         };
-        let facts = io.enumerate();
+        let facts = match io.enumerate() {
+            Ok(facts) => facts,
+            Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+        };
         self.online_from_facts(facts.clone(), io);
         let mut reports = Vec::new();
         let mut events = Vec::new();
@@ -705,13 +730,15 @@ impl Daemon {
             .iter()
             .flat_map(|report| report.items.iter().cloned())
             .collect();
-        Handled::ok(
+        let mut handled = Handled::ok(
             id,
             CheckResponse {
                 overall: CheckReport::new(None, overall_items),
                 reports,
             },
-        )
+        );
+        handled.events = events;
+        handled
     }
 
     // --- pause ------------------------------------------------------------
@@ -950,7 +977,13 @@ impl Daemon {
     fn handle_doctor(&mut self, io: &mut dyn DeviceIo, id: Option<u64>) -> Handled {
         let mut items = io.doctor_probe();
         let loaded = self.store().load().unwrap_or_default();
-        let online = self.online_with_status(io);
+        let online = match self.online_with_status(io) {
+            Ok(online) => online,
+            Err(error) => {
+                items.push(DoctorItem::new("inventory", "USB enumeration failed", DoctorStatus::Error, error));
+                Vec::new()
+            }
+        };
         for config in &loaded.devices {
             let present = online
                 .iter()
@@ -987,7 +1020,7 @@ impl Daemon {
         Handled::ok(id, ShutdownResponse { accepted: true })
             .with(Event::ServiceStopping {
                 release_blocked,
-                note,
+                note: note.clone(),
                 operator: self.operator(caller),
             })
             .journal(
@@ -996,6 +1029,7 @@ impl Daemon {
                     .details(serde_json::json!({
                         "release_blocked": release_blocked,
                         "blocked_devices": blocked,
+                        "note": note,
                     })),
             )
             .effect(Effect::Shutdown { release_blocked })
@@ -1126,7 +1160,11 @@ impl Daemon {
         devnode: &str,
         note: Option<String>,
     ) -> Handled {
-        let Some(fact) = io.facts_for_devnode(devnode) else {
+        let fact = match io.facts_for_devnode(devnode) {
+            Ok(fact) => fact,
+            Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+        };
+        let Some(fact) = fact else {
             return Handled::err(
                 id,
                 ProtocolError::not_found(
@@ -1185,7 +1223,11 @@ impl Daemon {
         devnode: &str,
         note: Option<String>,
     ) -> Handled {
-        let Some(fact) = io.facts_for_devnode(devnode) else {
+        let fact = match io.facts_for_devnode(devnode) {
+            Ok(fact) => fact,
+            Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+        };
+        let Some(fact) = fact else {
             return Handled::err(
                 id,
                 ProtocolError::not_found(

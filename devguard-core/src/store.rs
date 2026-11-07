@@ -70,8 +70,9 @@ impl DeviceStore {
         }
 
         let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
             .collect();
         files.sort();
@@ -80,7 +81,7 @@ impl DeviceStore {
         let mut errors = Vec::new();
         for file in files {
             let mut text = String::new();
-            match File::open(&file) {
+            match open_config(&file) {
                 Ok(mut handle) => {
                     if let Err(error) = handle.read_to_string(&mut text) {
                         errors.push(ConfigLoadError {
@@ -127,6 +128,7 @@ impl DeviceStore {
     }
 
     pub fn get(&self, name: &str) -> Result<DeviceConfig, StoreError> {
+        validate_name(name)?;
         let loaded = self.load()?;
         loaded
             .get(name)
@@ -142,15 +144,14 @@ impl DeviceStore {
         config: &DeviceConfig,
         _note: Option<&str>,
     ) -> Result<SaveOutcome, StoreError> {
-        if !config.name.is_empty()
-            && !config
-                .name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
-            return Err(StoreError::InvalidName(config.name.clone()));
-        }
+        validate_name(&config.name)?;
         let loaded = self.load()?;
+        if !loaded.errors.is_empty() {
+            return Err(StoreError::Invalid {
+                message: "fix unreadable or invalid device files before saving a configuration".into(),
+                issues: Vec::new(),
+            });
+        }
         let mut candidate = loaded.devices.clone();
         candidate.retain(|device| device.name != config.name);
         candidate.push(config.clone());
@@ -195,9 +196,14 @@ impl DeviceStore {
     }
 
     pub fn delete(&self, name: &str) -> Result<Option<PathBuf>, StoreError> {
+        validate_name(name)?;
         let path = self.paths.device_file(name);
-        if !path.exists() {
-            return Err(StoreError::NotFound(name.to_owned()));
+        match open_config(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StoreError::NotFound(name.to_owned()));
+            }
+            Err(error) => return Err(error.into()),
         }
         fs::create_dir_all(self.paths.backups_dir())?;
         let backup = self.backup_file(&path, name, "deleted")?;
@@ -211,12 +217,15 @@ impl DeviceStore {
         name: &str,
         suffix: &str,
     ) -> Result<PathBuf, std::io::Error> {
-        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ");
         let backup = self
             .paths
             .backups_dir()
             .join(format!("{name}-{suffix}-{stamp}.toml"));
-        fs::copy(path, &backup)?;
+        let mut source = open_config(path)?;
+        let mut destination = OpenOptions::new().create_new(true).write(true).open(&backup)?;
+        std::io::copy(&mut source, &mut destination)?;
+        destination.sync_all()?;
         self.prune_backups(name, 20);
         Ok(backup)
     }
@@ -241,6 +250,31 @@ impl DeviceStore {
             let _ = fs::remove_file(oldest);
         }
     }
+}
+
+fn validate_name(name: &str) -> Result<(), StoreError> {
+    crate::util::validate_name(name).map_err(|_| StoreError::InvalidName(name.to_owned()))
+}
+
+fn open_config(path: &Path) -> std::io::Result<File> {
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "device configurations must be regular files, not symlinks",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a regular configuration file"));
+    }
+    Ok(file)
 }
 
 /// Write a file so a reader sees either the old content or the new content,

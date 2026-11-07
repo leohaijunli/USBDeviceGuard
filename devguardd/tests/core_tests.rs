@@ -61,6 +61,7 @@ struct FakeIo {
     apply_calls: Vec<String>,
     /// Refuse deauthorization for this USB path (composite safety).
     refuse_block: Option<String>,
+    check_drift: bool,
 }
 
 impl FakeIo {
@@ -80,17 +81,18 @@ impl FakeIo {
             ],
             apply_calls: Vec::new(),
             refuse_block: None,
+            check_drift: false,
         }
     }
 }
 
 impl DeviceIo for FakeIo {
-    fn enumerate(&self) -> Vec<UdevFacts> {
-        self.devices.clone()
+    fn enumerate(&self) -> Result<Vec<UdevFacts>, String> {
+        Ok(self.devices.clone())
     }
 
-    fn facts_for_devnode(&self, devnode: &str) -> Option<UdevFacts> {
-        self.devices.iter().find(|d| d.devnode == devnode).cloned()
+    fn facts_for_devnode(&self, devnode: &str) -> Result<Option<UdevFacts>, String> {
+        Ok(self.devices.iter().find(|d| d.devnode == devnode).cloned())
     }
 
     fn apply(
@@ -114,7 +116,14 @@ impl DeviceIo for FakeIo {
         config: &devguard_core::DeviceConfig,
         _facts: &UdevFacts,
     ) -> devguard_core::CheckReport {
-        devguard_core::CheckReport::new(Some(config.name.clone()), Vec::new())
+        let items = if self.check_drift {
+            vec![devguard_core::CheckItem::warning(
+                "fixture.mode", "mode differs", "0600", "apply the configuration",
+            )]
+        } else {
+            Vec::new()
+        };
+        devguard_core::CheckReport::new(Some(config.name.clone()), items)
     }
 
     fn set_authorized(&mut self, usb_path: &str, _authorize: bool) -> Result<(), String> {
@@ -680,4 +689,27 @@ fn pause_presets_are_enforced_by_the_core_not_only_the_gui() {
         );
         assert_eq!(error_of(&refused).code, "invalid_request", "{minutes}");
     }
+}
+
+#[test]
+fn every_query_response_preserves_the_request_id() {
+    let mut daemon = daemon();
+    let mut io = FakeIo::with_px4_and_adapter();
+    for request in [Request::List, Request::PolicyGet, Request::ServiceState, Request::Doctor] {
+        let handled = daemon.handle(&mut io, &group_caller(), Some(73), request);
+        assert!(handled.response.ok);
+        assert_eq!(handled.response.id, Some(73));
+    }
+}
+
+#[test]
+fn check_returns_drift_events_for_subscribers() {
+    let mut daemon = daemon();
+    let mut io = FakeIo::with_px4_and_adapter();
+    daemon.handle(&mut io, &authorized_caller(), Some(1), Request::SaveDevice {
+        config: px4_config(), note: None,
+    });
+    io.check_drift = true;
+    let handled = daemon.handle(&mut io, &group_caller(), Some(2), Request::Check { name: None });
+    assert!(handled.events.iter().any(|event| matches!(event, Event::DriftDetected { .. })));
 }
