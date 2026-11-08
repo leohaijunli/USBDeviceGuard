@@ -1,8 +1,10 @@
-# devguard 开发与验收进度
+# SerialGuard 开发与验收进度
 
-更新：2026-11-07。
+更新：2026-11-08。
 
-## 当前门禁：阶段 2（进行中；Linux 真机验收未通过）
+## 当前门禁：阶段 4（部分完成；真机后续验收暂缓）
+
+阶段 2/3 的 WSL 开发链路已验证；目标 Arch/Wayland 和人工物理插拔仍未验收。当前已完成 systemd 单元、就绪通知、安全 socket 接管及离线回归；3/10 轮 WSL 重连自动 apply 通过。设备离线后，工程师选择先完成软件部分，剩余 7 轮、SIGKILL 恢复、正常停止及停止期间热插拔实测等待设备接回。polkit 策略和桌面 agent、跨重启对账及 GUI 重连也仍待完成。
 
 需求基线见 [`requirements.md`](requirements.md)。工程师先前暂缓阶段 0 的 Linux 桌面验收并要求继续开发；该偏离保留，不能以 WSL 软件测试代替 Arch/Omarchy/Wayland 验收。
 
@@ -21,10 +23,10 @@
 | --- | --- | --- |
 | 0 NSH spike | Windows 侧完成；Linux 验收被用户暂缓 | 17 项测试 + 7 张原生截图；`scripts/verify-nsh-linux.sh` 待 Arch/Omarchy 执行 |
 | 1 core + 配置 | 完成（软件可测部分） | Windows 28 单元 + 9 集成通过；Linux 另含 1 项 symlink 集成和 5 项 Unix 客户端测试 |
-| 2 daemon + udev | **完成（部署级验收通过）**：system 模式规则激活 + 真实插拔后链接权限正确；物理插拔的桌面层（Arch/Omarchy 特有 Wayland 部分）归阶段 0/4 的桌面验收 | 纯核心 22 项、Inventory 4、socket RPC 9、CLI 9 操作、`udevadm verify` 通过；WSL 实机枚举 0→1、热插拔事件闭环、system 模式下 daemon 生成并 reload 真实 `/etc/udev/rules.d/90-devguard.rules`、`udevadm test` 命中、真实插拔后 symlink/dialout/0660/MM 标记全部正确、check 四项 ok（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`、`linux-system-mode-2026-11-08.md`） |
+| 2 daemon + udev | WSL 部署路径通过；目标桌面 Linux 与人工物理插拔待补 | 已验证 system 模式规则生成/reload、`udevadm verify/test`、usbipd 重连后的 symlink/dialout/0660/MM 标记及事件流；这些是 WSL 真实 udev 证据，不等同 Arch/Omarchy 或人工拔线验收（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`、`linux-system-mode-2026-11-08.md`） |
 | 3 termios/check/run | 完成（pty 门禁 + 真机 apply/check/run 验收通过） | WSL 116 项测试（含 pty 9 + run 端到端 2）；真机 apply 写入 115200 8N1 raw 并回读验证、偏差注入/检出/修复闭环、run 的 fd 继承在实机验证（`artifacts/linux-real-termios-2026-11-08.md`）；实测 cdc_acm/vhci 不保持 CS7，5-7 数据位申请将得到明确回读错误 |
 | 3.5 P0 修复 | 完成 | 允许表按 devnode 拔出即清（回归测试覆盖复插再拦截）、store 读取失败 fail-closed（`store_unavailable` 审计 + list 以 problem 展示）、CDC-ACM learn 草稿 baud=n/a |
-| 4 事件/polkit/systemd | 未开始 | 优先级：`devguard-apply@.service`（插拔后自动修复 termios）> systemd 单元 > polkit；WSL 有 systemd 可开发，桌面 polkit agent 验收需目标机 |
+| 4 事件/polkit/systemd | 部分完成：systemd 软件实现与 3/10 轮自动 apply 通过 | Linux 132、Windows 78 项 Rust 测试及两端 clippy 通过，Python 续跑测试 8 项通过；剩余重连及服务恢复/停止实测、polkit、启动对账仍待完成。详见 [`systemd.md`](systemd.md) |
 | 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境；完成后发布 alpha |
 | 6 正式 GUI | 未开始 | 当前 GUI 仅最小 NSH 骨架 |
 | 7 打包/文档 | 未开始 | 发布计划见 [`release.md`](release.md)；**本阶段执行 SerialGuard 机械改名** |
@@ -35,6 +37,18 @@
 - 每个实测记录命令、环境、结果；失败保留原因和下一步。
 - 不把待办项、空入口或模拟设备计为完成的产品功能。
 - 新结果更新本文件与 [`nsh-spike.md`](nsh-spike.md)，设计冲突更新 [`design.md`](design.md)。
+
+## 2026-11-08：阶段 4 systemd 软件收尾
+
+- `packaging/systemd/devguardd.service` 使用 `Type=notify`、`Restart=on-failure`、`KillMode=control-group`。daemon 在初始快照和 RPC worker 就绪后才发 `READY=1`，避免 apply@ 在 socket 尚未准备好时抢跑；文件路径和抽象 notify socket 均有回归测试。
+- `devguard-apply@.service` 由既有 udev `SYSTEMD_WANTS` 触发，通过 `ExecCondition` 仅在 daemon 已运行时 apply；不添加拉起 daemon 的 `Wants/Requires`。离线单元契约测试通过，停止期间的实际行为仍需补实测。
+- `daemon.lock` 以 `flock` 保证实例互斥并跨崩溃保留文件；只有自有、无额外硬链接、确认 `ECONNREFUSED` 且 inode 未变化的 socket 才可恢复。普通文件、符号链接、硬链接、活监听者及并发接管都有回归覆盖。
+- `applied`/`apply_failed` 审计记录可信请求操作者；启动记录仍不冒充操作者，并明确区分 termios 可用与 authorized/power 写入禁用，不再沿用阶段 2 的笼统 `hardware_writes=false` 描述。
+- WSL 已安装并启动 notify 版本服务；自动 apply 真机检查点记录了 3 个完整重连周期，每次只出现一组 removed/added，symlink/access/MM/termios 全 ok，自动操作记录 uid=0。第 4 轮只记录到 removed 后服务端重启中断，不能计为通过。原始文件：`artifacts/systemd-acceptance-2026-11-08.events.jsonl`。
+- 设备随后不在 Windows Connected 清单中，只剩历史共享记录；工程师选择先完成软件部分。本轮未补做剩余真机测试，亦未将 WSL 重连记为人工物理插拔。
+- 新增 `scripts/verify-linux-systemd.py`：精确核对 BUSID + PnP serial、保持 WSL 验证连接、明确 opt-in、备份旧安装、逐步落盘、`--resume-from` 跳过完整周期。测试模式有时限等待，非 daemon 的设备轮询。恢复后用新输出文件继续，若新构建与已安装文件不同，不能使用 `--skip-install`。
+- 最新验证：core/daemon/CLI Linux **132**、Windows **78** 项通过，两端 `clippy --all-targets --locked -- -D warnings` 通过；续跑检查点的 Python 离线测试 **8** 项在两端通过。GUI 未在本轮改动或重新验收。
+- 后续门禁：余下 7 轮 WSL 重连、真实 systemd 的 SIGKILL 自愈与正常 shutdown 不重启、停止后插入不拉起 daemon；polkit 策略/agent、启动对账、GUI 重连及目标桌面验收另行推进。
 
 ## 2026-11-07：本机 WSL 与阶段 2 续开发
 

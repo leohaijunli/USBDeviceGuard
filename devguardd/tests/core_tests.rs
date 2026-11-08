@@ -765,6 +765,23 @@ fn cdc_acm_drafts_keep_baud_na_instead_of_a_number() {
 }
 
 #[test]
+fn explicit_apply_records_the_authorized_operator_on_the_applied_entry() {
+    let mut daemon = daemon();
+    let mut io = FakeIo::with_px4_and_adapter();
+    let caller = authorized_caller();
+    assert!(daemon.handle(&mut io, &caller, Some(1), Request::SaveDevice {
+        config: px4_config(), note: None,
+    }).response.ok);
+    let handled = daemon.handle(&mut io, &caller, Some(2), Request::Apply {
+        name: Some("px4-main".into()), devnode: None,
+    });
+    assert!(handled.response.ok, "{:?}", handled.response.error);
+    let entry = handled.journal.iter().find(|entry| entry.event == "applied").unwrap();
+    assert_eq!(entry.uid, Some(caller.uid));
+    assert_eq!(entry.user.as_deref(), Some(caller.user.as_str()));
+}
+
+#[test]
 fn an_allowance_ends_at_unplug_even_when_keyed_by_usb_path() {
     let mut daemon = daemon();
     let mut io = FakeIo::with_px4_and_adapter();

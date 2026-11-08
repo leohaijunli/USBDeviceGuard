@@ -254,6 +254,117 @@ async fn client_supplied_root_identity_is_ignored_and_denial_is_audited() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_socket_is_taken_over_but_a_live_daemon_never_is() {
+    use std::os::unix::net::UnixListener as StdListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+
+    // A socket file left behind by a killed daemon: exists, nobody listens.
+    let leftover = StdListener::bind(paths.socket()).unwrap();
+    drop(leftover);
+    assert!(paths.socket().exists(), "the stale socket file must still exist");
+
+    // The restarted daemon takes it over instead of crash-looping.
+    let restarted = Server::bind(paths.clone(), AccessPolicy::sandbox());
+    assert!(restarted.is_ok(), "stale socket takeover failed: {:?}", restarted.err());
+
+    // A second bind while the first daemon is alive must still be refused.
+    let second = Server::bind(paths, AccessPolicy::sandbox());
+    assert!(second.is_err(), "a live daemon's socket must not be stolen");
+}
+
+#[tokio::test]
+async fn startup_does_not_follow_or_replace_an_untrusted_instance_lock() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+    let other = dir.path().join("preserve-me");
+    fs::write(&other, b"user-owned data").unwrap();
+    let lock = paths.run.join("daemon.lock");
+    symlink(&other, &lock).unwrap();
+
+    assert!(Server::bind(paths.clone(), AccessPolicy::sandbox()).is_err());
+    assert!(fs::symlink_metadata(&lock).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read(&other).unwrap(), b"user-owned data");
+    fs::remove_file(&lock).unwrap();
+    fs::hard_link(&other, &lock).unwrap();
+    assert!(Server::bind(paths, AccessPolicy::sandbox()).is_err());
+    assert_eq!(fs::read(&other).unwrap(), b"user-owned data");
+}
+
+#[tokio::test]
+async fn occupied_non_socket_paths_are_preserved() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+    fs::write(paths.socket(), b"keep this file").unwrap();
+    assert!(Server::bind(paths.clone(), AccessPolicy::sandbox()).is_err());
+    assert_eq!(fs::read(paths.socket()).unwrap(), b"keep this file");
+
+    fs::remove_file(paths.socket()).unwrap();
+    symlink(dir.path().join("absent"), paths.socket()).unwrap();
+    assert!(Server::bind(paths.clone(), AccessPolicy::sandbox()).is_err());
+    assert!(fs::symlink_metadata(paths.socket()).unwrap().file_type().is_symlink());
+}
+
+#[tokio::test]
+async fn socket_recovery_does_not_remove_a_hard_link_to_another_socket() {
+    use std::fs;
+    use std::os::unix::net::UnixListener as StdListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+    let other_path = dir.path().join("preserve-socket");
+    drop(StdListener::bind(&other_path).unwrap());
+    fs::hard_link(&other_path, paths.socket()).unwrap();
+    assert!(Server::bind(paths.clone(), AccessPolicy::sandbox()).is_err());
+    assert!(paths.socket().exists() && other_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_concurrent_restarts_cannot_steal_each_others_socket() {
+    use std::os::unix::net::UnixListener as StdListener;
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+    let leftover = StdListener::bind(paths.socket()).unwrap();
+    drop(leftover);
+    let barrier = Arc::new(Barrier::new(2));
+    let contenders: Vec<_> = (0..2).map(|_| {
+        let paths = paths.clone();
+        let barrier = barrier.clone();
+        tokio::task::spawn_blocking(move || {
+            barrier.wait();
+            Server::bind(paths, AccessPolicy::sandbox())
+        })
+    }).collect();
+    // Keep the winning server alive while the other contender finishes.
+    let mut winners = Vec::new();
+    for contender in contenders {
+        if let Ok(server) = contender.await.unwrap() { winners.push(server); }
+    }
+    assert_eq!(winners.len(), 1);
+    let mut client = Client::connect(paths.socket()).unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let server = winners.pop().unwrap();
+    let task = tokio::spawn(server.serve(NoUsb::default(), async { let _ = stopped.await; }));
+    tokio::task::spawn_blocking(move || client.request(Request::ServiceState).unwrap()).await.unwrap();
+    stop.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), task).await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enumeration_and_rule_failures_are_not_reported_as_success() {
     use devguard_core::client::ClientError;
     let io = NoUsb { inventory_error: Some("fixture enumeration failed".into()), rules_error: Some("fixture reload failed".into()), ..NoUsb::default() };

@@ -1,0 +1,19 @@
+[Unit]
+Description=SerialGuard apply configuration for %i
+# Triggered by udev: ENV{SYSTEMD_WANTS}="devguard-apply@%k.service" in
+# 90-devguard.rules.  %i is the kernel device name (e.g. ttyACM0).
+After=devguardd.service systemd-udevd.service
+# Do not add Wants=/Requires=devguardd.service here: hotplug must never
+# restart a daemon that the operator has deliberately stopped.
+
+[Service]
+Type=oneshot
+# The service contract (requirements 4.3): when the daemon is stopped,
+# nothing maintains baud or permissions - so the hook must not apply
+# behind a stopped daemon.  ExecCondition skips (without failing) when
+# devguardd is not active.
+ExecCondition=/usr/bin/systemctl is-active --quiet devguardd.service
+ExecStart=/usr/bin/devguardctl --socket /run/devguard/ctl.sock apply --devnode /dev/%i
+TimeoutStartSec=15s
+User=root
+UMask=0077

@@ -6,6 +6,8 @@ pub mod inventory;
 mod io;
 pub mod monitor;
 pub mod server;
+mod socket;
+mod systemd;
 pub use devguard_core::termios;
 
 pub use io::LinuxIo;

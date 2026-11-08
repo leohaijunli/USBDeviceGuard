@@ -23,6 +23,8 @@ use crate::{Caller, Daemon, Effect, Handled};
 
 use super::accounts::{self, Peer};
 use super::monitor::{MonitorEvent, UdevMonitor};
+use super::socket::{recover_socket, InstanceLock};
+use super::systemd;
 
 pub use devguard_core::protocol::MAX_REQUEST_BYTES;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -59,6 +61,9 @@ pub struct Server {
     paths: Paths,
     access: AccessPolicy,
     _socket: SocketGuard,
+    // Dropped after the socket guard: a new instance cannot bind before
+    // this one finishes cleaning up its socket.
+    _instance: InstanceLock,
 }
 
 impl Server {
@@ -99,12 +104,15 @@ impl Server {
                 }
             }
         }
-        // Never unlink an unfamiliar file or another daemon's socket.
-        let listener = UnixListener::bind(paths.socket())?;
+        // Serialize all cooperating instances before inspecting stale files.
+        let instance = InstanceLock::acquire(&paths.run.join("daemon.lock"))?;
+        let socket_path = paths.socket();
+        recover_socket(&socket_path)?;
+        let listener = UnixListener::bind(&socket_path)?;
         let guard = SocketGuard::new(paths.socket())?;
         set_group(&paths.socket(), access.gid())?;
         fs::set_permissions(paths.socket(), fs::Permissions::from_mode(0o660))?;
-        Ok(Self { listener, paths, access, _socket: guard })
+        Ok(Self { listener, paths, access, _socket: guard, _instance: instance })
     }
 
     pub async fn serve<I, F>(self, io: I, stop: F) -> anyhow::Result<()>
@@ -122,6 +130,9 @@ impl Server {
         let monitored = monitor.is_some();
         let mut worker = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let mut runtime = Runtime::new(paths, access.gid(), io, worker_events, monitored)?;
+            // Type=notify orders udev's apply@ hook after initialization,
+            // not merely after the process has been launched.
+            systemd::ready().context("cannot notify systemd of readiness")?;
             while let Some(command) = requests.blocking_recv() {
                 match command {
                     Command::Stop => return Ok(()),
@@ -347,14 +358,16 @@ struct Runtime<I> {
 impl<I: DeviceIo> Runtime<I> {
     fn new(paths: Paths, gid: u32, mut io: I, events: broadcast::Sender<EventMessage>, monitored: bool) -> anyhow::Result<Self> {
         if PolicyStore::new(&paths).load()?.mode != PolicyMode::Audit {
-            bail!("phase-2 shell only supports audit; review policy.toml before starting (it was not changed)");
+            bail!("the shell only supports audit; review policy.toml before starting (it was not changed)");
         }
         let journal = Journal::new(&paths);
         // SAFETY: read-only credentials, used only to describe this daemon start.
         let uid = unsafe { libc::geteuid() };
         journal.append(&JournalEntry::new("service_started")
             .details(serde_json::json!({
-                "pid": std::process::id(), "phase": 2, "hardware_writes": false,
+                "pid": std::process::id(), "phase": 4, "policy": "audit",
+                "termios_apply_enabled": true, "usb_authorization_writes_enabled": false,
+                "autosuspend_writes_enabled": false,
                 "identity_source": "daemon_process", "daemon_uid": uid,
                 "daemon_user": accounts::user_name(uid)?, "initiating_operator_known": false,
             })))?;
@@ -367,7 +380,8 @@ impl<I: DeviceIo> Runtime<I> {
     }
 
     fn observe(&mut self, hint: MonitorEvent) -> anyhow::Result<()> {
-        // Observation never calls apply, rule reload, termios or authorized.
+        // Observation never applies settings or changes rules/authorization.
+        // Registered-device checks can open the tty to read termios.
         let devices: BTreeMap<String, OnlineDevice> = self.daemon.online_with_status(&mut self.io)
             .map_err(anyhow::Error::msg)?.into_iter().map(|device| (device.devnode.clone(), device)).collect();
         let mut changes = Vec::new();
@@ -417,7 +431,7 @@ impl<I: DeviceIo> Runtime<I> {
         } else {
             let (error, event) = match self.daemon.authorize(caller, &request) {
                 Err(error) => (error, "request_denied"),
-                Ok(()) => (ProtocolError::unsupported("this hardware operation has not passed its Linux acceptance gate", "complete termios/composite-safety acceptance; this shell only supports audit and configuration"), "request_unavailable"),
+                Ok(()) => (ProtocolError::unsupported("this operation has not passed its Linux acceptance gate", "pause and enforcement await phase 5; audit, configuration and termios apply are available"), "request_unavailable"),
             };
             Handled { response: ResponseEnvelope::error(id, error), events: Vec::new(), effects: Vec::new(), journal: vec![JournalEntry::new(event).operator(caller.uid, &caller.user).details(serde_json::json!({"op": request.name()}))] }
         };

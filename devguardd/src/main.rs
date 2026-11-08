@@ -7,9 +7,9 @@ async fn main() -> anyhow::Result<()> {
     use devguardd::linux::monitor::UdevMonitor;
 
     #[derive(Parser)]
-    #[command(version, about = "USB serial policy daemon (phase 2, audit-only)")]
+    #[command(version, about = "SerialGuard USB serial daemon (audit-only; termios apply enabled)")]
     struct Args {
-        /// Private development tree. No host rules or device state are changed.
+        /// Private configuration/rules tree. Explicit apply still sets termios.
         #[arg(long)]
         root: Option<std::path::PathBuf>,
     }

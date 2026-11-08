@@ -228,7 +228,7 @@ impl Daemon {
             Request::LearnCandidate { devnode } => self.handle_learn(io, id, &devnode),
             Request::SaveDevice { config, note } => self.handle_save(io, caller, id, config, note),
             Request::DeleteDevice { name, note } => self.handle_delete(io, caller, id, &name, note),
-            Request::Apply { name, devnode } => self.handle_apply(io, id, name, devnode),
+            Request::Apply { name, devnode } => self.handle_apply(io, caller, id, name, devnode),
             Request::Check { name } => self.handle_check(io, id, name),
             Request::Pause { kind, minutes, note } => {
                 self.handle_pause(caller, id, kind, minutes, note)
@@ -586,6 +586,7 @@ impl Daemon {
     fn handle_apply(
         &mut self,
         io: &mut dyn DeviceIo,
+        caller: &Caller,
         id: Option<u64>,
         name: Option<String>,
         devnode: Option<String>,
@@ -683,6 +684,7 @@ impl Daemon {
                 let journal = JournalEntry::new("applied")
                     .name(&config.name)
                     .devnode(&outcome.devnode)
+                    .operator(caller.uid, &caller.user)
                     .details(serde_json::json!({
                         "applied": outcome.applied,
                         "warnings": outcome.warnings,
@@ -698,7 +700,12 @@ impl Daemon {
                 )
                 .journal(journal)
             }
-            Err(error) => Handled::err(id, ProtocolError::internal(format!("apply failed: {error}"))),
+            Err(error) => Handled::err(id, ProtocolError::internal(format!("apply failed: {error}")))
+                .journal(JournalEntry::new("apply_failed")
+                    .name(&config.name)
+                    .devnode(&facts.devnode)
+                    .operator(caller.uid, &caller.user)
+                    .details(serde_json::json!({ "reason": error }))),
         }
     }
 

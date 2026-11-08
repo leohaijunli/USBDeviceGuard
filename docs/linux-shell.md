@@ -1,16 +1,17 @@
 # Linux daemon / CLI 开发链路
 
-当前是**阶段 2 的部分实现，不是可部署的设备拦截器**。Windows GUI 保持只读诊断；没有刷写固件，也没有接管 Windows 的 USB 设备。
+当前是**阶段 4 的部分实现，不是生产设备拦截器**：Linux 可配置、检查和 apply termios，已有实验性 systemd 集成；enforce/pause 仍禁用。Windows GUI 保持只读诊断；不提供固件刷写。
 
 ## 当前范围
 
-- Linux daemon 提供真实 Unix socket / JSON-lines 请求：`list`、`show`、`learn_candidate`、`save_device`、`delete_device`、`check`、`doctor`、日志查询、服务状态和停止。
+- Linux daemon 提供真实 Unix socket / JSON-lines 请求：`list`、`show`、`learn_candidate`、`save_device`、`delete_device`、`apply`、`check`、`doctor`、日志查询、服务状态和停止。
 - 配置使用现有严格校验、备份与原子写；返回成功前持久化审计。规则更新失败会明确返回 `rules_failed`，说明**配置变更已保存**，不会谎报已应用到设备。
 - 只读枚举 `/sys/class/tty` 的 `ttyACM<数字>` / `ttyUSB<数字>`，读取 udev 属性，并核对 sysfs 中实际的物理 USB 父设备。tty 的 `DEVPATH` 不能直接当作 USB 授权路径。
 - 请求身份来自 `SO_PEERCRED`、`/proc/<pid>` 和本机账户查询。system 模式修改需 polkit；`--root` 模式仅允许该私有目录的同 uid 工程师操作自己的测试配置，这**不是 polkit 验收**。
 - 启动记录仅描述 daemon 进程，单独保存 `daemon_uid` / `daemon_user`；发起人未知时不填写操作者 uid/user，不冒充 GUI 操作者。systemd 启动/自启动作的可信审计仍待阶段 4/5。
 - 订阅提供配置、检查偏差、停止及只读设备增减/更新事件；`udevadm monitor` 就绪后建立初始快照，事件触发 Inventory 对账。跨重启对账及重连仍待实现；CLI `watch` 不轮询。
-- `apply`、暂停/恢复、策略切换、USB 授权写入明确返回 `unsupported`。没有后台 sysfs/termios 写操作；已有 enforce 策略文件会阻止此阶段的 daemon 启动，不会被偷偷改写。
+- 暂停/恢复、策略切换、USB 授权/power 写入仍禁用。`apply` 设置并校验 termios；安装 systemd hook 后会在已登记设备重连时自动调用。已有 enforce 策略文件会阻止 daemon 启动，不会被偷偷改写。
+- 实验性 systemd 单元和可续跑验证见 [`systemd.md`](systemd.md)。就绪通知、实例互斥和离线回归完成；真实后续验收仍待设备接回。
 
 ## WSL 非特权运行
 
@@ -43,7 +44,7 @@ $B/devguardctl run <登记名> --env "$HOME/.cache/devguard-sandbox/run/devguard
 
 `run` 不联系 daemon：读 env 文件 → 设置并校验 termios → 把设备作为子进程的 stdin/stdout/stderr 执行。env 缺失或 devnode 失效都会明确报错。注意：读 termios 需要打开 tty，`check`/`show` 因此与 `stty` 有同样的 open 副作用（不写字节）。
 
-`--root` 下的规则仅写入私有树，**不 reload 主机 udev、不创建真实设备链接、不打开串口**（termios apply 打开设备是阶段 3 门禁内唯一的设备访问）。根目录必须属于当前工程师，拒绝 `..`、根目录 symlink、混合系统/私有路径和解析到 `/` 的别名。socket 模式为 `0660`；不会自动删除已有文件或另一个 daemon 的 socket。普通关闭只清理自己创建的同 inode socket，强制杀进程后的遗留 socket需工程师确认后处理。
+`--root` 下的规则仅写入私有树，**不 reload 主机 udev、不创建真实设备链接**。显式 apply 写 termios，check/show/list 对已登记设备可能打开 tty 读取参数。根目录必须属于当前工程师，拒绝 `..`、根目录 symlink、混合系统/私有路径和解析到 `/` 的别名。socket 模式 `0660`；实例锁和 inode 检查允许安全恢复自有的死 socket，但拒绝活监听者、普通文件、符号链接及硬链接。正常关闭只清理自己的 socket，保留 `daemon.lock` 和已生成 env 文件。
 
 WSL 里的 USB 列表可能为空：Windows 的 COM 口不会自动映射为 Linux tty。真实 USB 转接和插拔验收需要另行确认，不包含在本轮软件测试中。
 

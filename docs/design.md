@@ -1,6 +1,6 @@
 # devguard 设计决策与实测记录
 
-基线：[`requirements.md`](requirements.md)。当前处于阶段 2；本文中的软件验证不能替代 Linux 真机或桌面验收。
+基线：[`requirements.md`](requirements.md)。当前处于阶段 4（systemd 部分实现）；本文中的软件验证不能替代 Linux 真机或桌面验收。
 
 ## 开发顺序与环境
 
@@ -10,15 +10,23 @@
 
 NSH 固定使用当前已安装的 `0.4.0`，精确 API 以该版本 crate 源码为准；官网 main 文档可能更新更快。GUI 为纯 Rust，保留官方模板的 `#[native_module]`、`#[component]`、`nsh.json` 和平台入口结构。
 
-### 阶段 2 Linux 壳的安全边界
+### Linux 壳的当前安全边界
 
 - WSL2 Ubuntu 26.04 已可用于 Linux 编译和真实 Unix socket 测试；WSL 中的 USB、polkit 桌面提示和 Arch/Wayland 仍须分别验收。
-- 在现有 `Daemon` / `DeviceIo` 接缝上接入 Linux 库存和 RPC，单一 worker 串行执行决策、持久化审计和后续 effect。枚举失败必须返回错误，不能伪装为空设备清单。
-- 此版本只运行 audit；live apply、授权写入、策略切换和暂停均拒绝。不会把尚未通过复合设备/termios 验证的状态机暴露为真实拦截功能。
+- 在现有 `Daemon` / `DeviceIo` 接缝上接入 Linux 库存和 RPC，单一 worker 串行执行决策、持久化审计和后续 effect。枚举失败必须显式暴露（list 使用 problems），不能伪装成健康的空设备清单。
+- 此版本只运行 audit；termios apply 可用，授权/power 写入、策略切换和暂停仍拒绝。不会把尚未通过复合设备/策略验证的状态机暴露为真实拦截功能。
 - system 模式使用内核 peer uid/gid/pid、`/proc` 启动时间/组和本地账户；polkit 的 process subject 包含 `pid,start_time,uid`，不接受客户端身份字段。
-- `--root` 是同 uid、私有文件树的开发能力，不是绕过生产 polkit 的开关。Linux 硬件只读，生成规则不 reload 主机 udev；sandbox 结果不得计为 polkit 或权限安装验收。
+- `--root` 是同 uid、私有文件树的开发能力，不是绕过生产 polkit 的开关。生成规则不 reload 主机 udev，但显式 apply 可打开串口并写 termios；sandbox 结果不得计为 polkit 或权限安装验收。
 - 配置保存/删除与规则激活不是跨文件事务：若规则更新失败，明确返回已保存配置的 `rules_failed`，保留真实配置事件与审计；不隐式恢复旧配置或宣称设备已应用。
 - 客户端与服务端共同限制帧长；响应编号必须匹配，事件序号递增。慢订阅者落后时明确断开并要求新快照，不能静默丢事件。
+
+### systemd 就绪与 socket 生命周期（2026-11-08）
+
+- 单元使用 `Type=notify`：初始快照、审计和 RPC worker 初始化完毕后才报告 READY。手动启动没有 NOTIFY_SOCKET 时不依赖 systemd；错误的通知地址导致启动失败，不谎报 ready。
+- socket 接管先持有私有 `daemon.lock` 的非阻塞 flock。锁文件不可删除以免生成两个锁 inode；关闭/崩溃会释放内核锁，子进程不会继承 CLOEXEC fd。SocketGuard 先清理自身 inode，再释放实例锁。
+- 遗留 socket 只在归当前 uid、无额外硬链接、非阻塞探测明确返回 ECONNREFUSED、再次核对 inode 后删除。满队列/EAGAIN 不等于死 socket。非 socket、符号链接和活监听者保留不动。
+- apply@ 只带 After 排序和运行状态 ExecCondition，不通过 Wants/Requires 拉起 daemon。单元契约已有离线测试，真实停止期间插拔仍待验收。
+- WSL 自动 apply 当前仅 3 个完整周期通过；中断续跑保持旧证据，序号连续性只对同一订阅会话作断言，不能假装服务重启后的事件序号仍连续。
 
 ## 需求第 3 节的决策登记
 

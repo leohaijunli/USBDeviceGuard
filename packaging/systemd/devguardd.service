@@ -1,0 +1,24 @@
+[Unit]
+Description=SerialGuard USB serial policy daemon
+# The daemon talks to systemd-udevd for enumeration and monitoring.
+Wants=systemd-udevd.service
+After=systemd-udevd.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/devguardd
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+# Legal shutdown (via the `shutdown` request) exits 0 and is not
+# restarted; crashes and SIGKILL are (requirements section 4.3).
+Restart=on-failure
+RestartSec=1s
+# The daemon needs root for sysfs/udev and trusted peer-credential
+# lookups; it never drops privileges into a user session.
+User=root
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
