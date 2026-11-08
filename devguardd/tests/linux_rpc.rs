@@ -55,6 +55,16 @@ impl Harness {
         Self { _dir: dir, paths, stop, task }
     }
 
+    fn start_with_checker(access: AccessPolicy, io: NoUsb, program: std::path::PathBuf) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(dir.path());
+        let server = Server::bind(paths.clone(), access).unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let checker = devguardd::linux::Checker::checker_for(program, std::time::Duration::from_secs(5));
+        let task = tokio::spawn(server.serve_with_checker(io, async { let _ = stopped.await; }, checker));
+        Self { _dir: dir, paths, stop, task }
+    }
+
     async fn finish(self) {
         let _ = self.stop.send(());
         tokio::time::timeout(std::time::Duration::from_secs(5), self.task).await.unwrap().unwrap().unwrap();
@@ -249,6 +259,73 @@ async fn client_supplied_root_identity_is_ignored_and_denial_is_audited() {
         let mut client = Client::connect(socket).unwrap();
         let log: LogResponse = client.request(Request::LogQuery { filter: LogFilter { event: Some("request_denied".into()), ..LogFilter::default() } }).unwrap().into_data().unwrap();
         assert_eq!(log.query.entries[0].uid, Some(unsafe { libc::geteuid() }));
+    }).await.unwrap();
+    harness.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_polkit_denial_blocks_the_effect_and_audits_the_real_operator() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    assert_ne!(unsafe { libc::geteuid() }, 0, "run authorization tests as a normal user");
+    // A checker that denies: the daemon must not save the device, must return
+    // unauthorized, and must audit the denial under the true peer uid.
+    let dir = tempfile::tempdir().unwrap();
+    let checker = dir.path().join("pkcheck-denies");
+    fs::write(&checker, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&checker, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let harness = Harness::start_with_checker(AccessPolicy::System { gid: u32::MAX }, NoUsb::default(), checker);
+    let socket = harness.paths.socket();
+    tokio::task::spawn_blocking(move || {
+        let mut client = Client::connect(socket).unwrap();
+        let error = client.request(Request::SaveDevice { config: config(), note: None }).unwrap_err();
+        assert!(matches!(error, devguard_core::client::ClientError::Protocol(ref e) if e.code == "unauthorized"), "{error}");
+    }).await.unwrap();
+    let harness = harness.restart().await;
+    let socket = harness.paths.socket();
+    tokio::task::spawn_blocking(move || {
+        let mut client = Client::connect(socket).unwrap();
+        let log: LogResponse = client.request(Request::LogQuery { filter: LogFilter { event: Some("request_denied".into()), ..LogFilter::default() } }).unwrap().into_data().unwrap();
+        let entry = log.query.entries[0].clone();
+        assert_eq!(entry.uid, Some(unsafe { libc::geteuid() }));
+        assert_eq!(entry.details.get("op").and_then(|value| value.as_str()), Some("save_device"));
+        assert_eq!(entry.details.get("action").and_then(|value| value.as_str()), Some("dev.devguard.modify"));
+    }).await.unwrap();
+    harness.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_polkit_grant_allows_a_mutation_and_audits_the_authorized_operator() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    assert_ne!(unsafe { libc::geteuid() }, 0, "run authorization tests as a normal user");
+    let dir = tempfile::tempdir().unwrap();
+    let checker = dir.path().join("pkcheck-grants");
+    fs::write(&checker, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&checker, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let harness = Harness::start_with_checker(AccessPolicy::System { gid: u32::MAX }, NoUsb::default(), checker);
+    let socket = harness.paths.socket();
+    tokio::task::spawn_blocking(move || {
+        let mut client = Client::connect(socket).unwrap();
+        // With a positive polkit decision the device is saved (not denied),
+        // reaching the decision core and persisting the config.
+        let result = client.request(Request::SaveDevice { config: config(), note: Some("polkit-grant".into()) });
+        if let Err(e) = result {
+            panic!("grant should have been authorized, got: {e}");
+        }
+    }).await.unwrap();
+    let harness = harness.restart().await;
+    let socket = harness.paths.socket();
+    tokio::task::spawn_blocking(move || {
+        let mut client = Client::connect(socket).unwrap();
+        let log: LogResponse = client.request(Request::LogQuery { filter: LogFilter { event: Some("config_changed".into()), ..LogFilter::default() } }).unwrap().into_data().unwrap();
+        let entry = log.query.entries[0].clone();
+        assert_eq!(entry.uid, Some(unsafe { libc::geteuid() }));
+        assert_eq!(entry.details.get("note").and_then(|value| value.as_str()), Some("polkit-grant"));
     }).await.unwrap();
     harness.finish().await;
 }

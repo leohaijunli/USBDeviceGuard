@@ -1,6 +1,7 @@
 //! devguard: configuration, validation and wire protocol types shared by
 //! the daemon, the CLI and the GUI.
 
+pub mod authorization;
 pub mod check;
 pub mod config;
 pub mod doctor;
@@ -19,6 +20,7 @@ pub mod util;
 pub mod client;
 
 pub use check::{CheckItem, CheckReport, Severity};
+pub use authorization::PolkitAction;
 pub use config::{
     AccessConfig, BaudRate, DeviceConfig, DeviceId, DeviceKind, FlowControl, IdRole, Parity,
     SerialConfig, ValidationIssue,

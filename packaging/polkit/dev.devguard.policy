@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD polkit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<policyconfig>
+  <vendor>SerialGuard</vendor>
+  <!-- Development IDs remain dev.devguard until the coordinated packaging rename.
+       No cached grants, pkexec paths, or implications for systemd-wide actions. -->
+  <action id="dev.devguard.modify">
+    <description>Modify SerialGuard device configuration</description>
+    <message>Administrator authentication is required to modify or apply SerialGuard device settings.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+  <action id="dev.devguard.pause">
+    <description>Pause or resume SerialGuard protection</description>
+    <message>Administrator authentication is required to change SerialGuard protection or device allowances.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+  <action id="dev.devguard.service-stop">
+    <description>Stop the SerialGuard daemon</description>
+    <message>Administrator authentication is required to stop SerialGuard with the selected release options.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+  <!-- Domain intents for future service control. These do NOT authorize
+       StartUnit or EnableUnitFiles: systemd must independently authorize them. -->
+  <action id="dev.devguard.service-start">
+    <description>Request SerialGuard service startup</description>
+    <message>Administrator authentication is required for the SerialGuard startup request.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+  <action id="dev.devguard.service-autostart">
+    <description>Request a change to SerialGuard autostart</description>
+    <message>Administrator authentication is required for the SerialGuard autostart request.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

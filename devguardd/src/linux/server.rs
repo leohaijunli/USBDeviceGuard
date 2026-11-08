@@ -8,7 +8,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -23,6 +23,7 @@ use crate::{Caller, Daemon, Effect, Handled};
 
 use super::accounts::{self, Peer};
 use super::monitor::{MonitorEvent, UdevMonitor};
+use super::polkit::{Checker, Decision};
 use super::socket::{recover_socket, InstanceLock};
 use super::systemd;
 
@@ -69,7 +70,7 @@ pub struct Server {
 impl Server {
     pub async fn serve_monitored<I, F>(self, io: I, monitor: UdevMonitor, stop: F) -> anyhow::Result<()>
     where I: DeviceIo + Send + 'static, F: Future<Output = ()> {
-        self.serve_inner(io, Some(monitor), stop).await
+        self.serve_inner(io, Some(monitor), stop, Checker::default()).await
     }
 
     pub fn bind(paths: Paths, access: AccessPolicy) -> io::Result<Self> {
@@ -117,10 +118,16 @@ impl Server {
 
     pub async fn serve<I, F>(self, io: I, stop: F) -> anyhow::Result<()>
     where I: DeviceIo + Send + 'static, F: Future<Output = ()> {
-        self.serve_inner(io, None, stop).await
+        self.serve_inner(io, None, stop, Checker::default()).await
     }
 
-    async fn serve_inner<I, F>(self, io: I, monitor: Option<UdevMonitor>, stop: F) -> anyhow::Result<()>
+    #[doc(hidden)]
+    pub async fn serve_with_checker<I, F>(self, io: I, stop: F, checker: Checker) -> anyhow::Result<()>
+    where I: DeviceIo + Send + 'static, F: Future<Output = ()> {
+        self.serve_inner(io, None, stop, checker).await
+    }
+
+    async fn serve_inner<I, F>(self, io: I, monitor: Option<UdevMonitor>, stop: F, checker: Checker) -> anyhow::Result<()>
     where I: DeviceIo + Send + 'static, F: Future<Output = ()> {
         let (commands, mut requests) = mpsc::channel::<Command>(64);
         let (events, _) = broadcast::channel::<EventMessage>(256);
@@ -142,9 +149,9 @@ impl Server {
                         }
                     }
                     Command::MonitorFailed(reason) => return runtime.monitor_failed(reason),
-                    Command::Request { envelope, caller, reply } => {
+                    Command::Request { envelope, caller, denial, reply } => {
                         let id = envelope.id;
-                        let result = runtime.dispatch(&caller, *envelope);
+                        let result = runtime.dispatch(&caller, *envelope, denial);
                         match result {
                             Ok((response, shutdown)) => {
                                 let _ = reply.send(response);
@@ -186,6 +193,7 @@ impl Server {
             })
         });
         let mut connections = JoinSet::new();
+        let checker = Arc::new(checker);
         tokio::pin!(stop);
         let finished = loop {
             tokio::select! {
@@ -196,8 +204,9 @@ impl Server {
                     let commands = commands.clone();
                     let receiver = events.subscribe();
                     let closed = closed.clone();
+                    let checker = checker.clone();
                     connections.spawn(async move {
-                        if let Err(error) = connection(stream, access, commands, receiver, closed).await {
+                        if let Err(error) = connection(stream, access, commands, receiver, closed, checker).await {
                             eprintln!("devguardd: client connection closed: {error}");
                         }
                     });
@@ -228,7 +237,7 @@ impl Server {
 }
 
 enum Command {
-    Request { envelope: Box<RequestEnvelope>, caller: Caller, reply: oneshot::Sender<ResponseEnvelope> },
+    Request { envelope: Box<RequestEnvelope>, caller: Caller, denial: Option<ProtocolError>, reply: oneshot::Sender<ResponseEnvelope> },
     DeviceEvent(MonitorEvent),
     MonitorFailed(String),
     Stop,
@@ -240,6 +249,7 @@ async fn connection(
     commands: mpsc::Sender<Command>,
     mut events: broadcast::Receiver<EventMessage>,
     mut closed: watch::Receiver<bool>,
+    checker: Arc<Checker>,
 ) -> io::Result<()> {
     let peer = Peer::from_stream(&stream)?;
     if matches!(access, AccessPolicy::Sandbox { uid, .. } if uid != peer.uid) {
@@ -264,17 +274,9 @@ async fn connection(
             }
         };
         let subscribe = matches!(envelope.request, Request::SubscribeEvents);
-        let mut caller = peer.caller()?;
-        if !envelope.request.is_read_only() {
-            caller.polkit_authorized = match access {
-                AccessPolicy::Sandbox { uid, .. } => peer.uid == uid,
-                AccessPolicy::System { .. } => {
-                    if caller.uid == 0 { true } else { polkit(&peer, &envelope.request).await }
-                }
-            };
-        }
+        let guarded = guarded_caller(&peer, access, &envelope.request, &checker, &mut closed).await?;
         let (reply, response) = oneshot::channel();
-        commands.send(Command::Request { envelope: Box::new(envelope), caller, reply }).await.map_err(|_| io::Error::other("daemon is stopping"))?;
+        commands.send(Command::Request { envelope: Box::new(envelope), caller: guarded.caller, denial: guarded.denial, reply }).await.map_err(|_| io::Error::other("daemon is stopping"))?;
         let response = response.await.map_err(|_| io::Error::other("daemon worker stopped"))?;
         let subscribed = subscribe && response.ok;
         write_message(&mut write, response.id, &response).await?;
@@ -302,13 +304,45 @@ async fn connection(
     }
 }
 
-async fn polkit(peer: &Peer, request: &Request) -> bool {
-    let Some(action) = request.needs_polkit_action() else { return false; };
-    let child = tokio::process::Command::new("/usr/bin/pkcheck")
-        .args(["--action-id", action, "--process", &peer.polkit_subject(), "--allow-user-interaction"])
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).spawn();
-    let Ok(mut child) = child else { return false; };
-    matches!(tokio::time::timeout(Duration::from_secs(60), child.wait()).await, Ok(Ok(status)) if status.success())
+struct GuardedCaller {
+    caller: Caller,
+    denial: Option<ProtocolError>,
+}
+
+async fn guarded_caller(peer: &Peer, access: AccessPolicy, request: &Request, checker: &Checker,
+                        closing: &mut watch::Receiver<bool>) -> io::Result<GuardedCaller> {
+    let original = peer.caller()?;
+    if request.is_read_only() { return Ok(GuardedCaller { caller: original, denial: None }); }
+    let Some(action) = request.needs_polkit_action() else {
+        return Ok(GuardedCaller { caller: original, denial: Some(ProtocolError::unauthorized(
+            "no authorization action is defined for this operation", "use a compatible daemon/client")) });
+    };
+    let decision = match access {
+        AccessPolicy::Sandbox { uid, .. } if peer.uid == uid => Decision::Authorized,
+        AccessPolicy::Sandbox { .. } => Decision::Denied("sandbox_owner_mismatch"),
+        AccessPolicy::System { .. } if original.uid == 0 => Decision::Authorized,
+        AccessPolicy::System { .. } => checker.check(peer, action, closing).await,
+    };
+    // Authentication may take a minute. Never dispatch an old identity or
+    // stale supplementary groups after the await, even with a positive grant.
+    Ok(finish_authorization(original, peer.caller(), decision, action))
+}
+
+fn finish_authorization(original: Caller, refreshed: io::Result<Caller>, decision: Decision,
+                        action: &'static str) -> GuardedCaller {
+    let mut caller = match refreshed {
+        Ok(caller) if caller.uid == original.uid => caller,
+        _ => return GuardedCaller { caller: original, denial: Some(ProtocolError::unauthorized(
+            "socket peer identity changed during authorization", "reconnect from the same user and retry")) },
+    };
+    caller.polkit_authorized = decision == Decision::Authorized;
+    let denial = match decision {
+        Decision::Authorized => None,
+        Decision::Denied(reason) => Some(ProtocolError::unauthorized(
+            format!("{action}: {reason}"),
+            "retry from an active local session with a polkit agent; check installed SerialGuard policy or ask an administrator")),
+    };
+    GuardedCaller { caller, denial }
 }
 
 pub async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<Option<String>> {
@@ -416,12 +450,17 @@ impl<I: DeviceIo> Runtime<I> {
         bail!("udev monitoring stopped; device snapshots must not be treated as live: {reason}")
     }
 
-    fn dispatch(&mut self, caller: &Caller, envelope: RequestEnvelope) -> anyhow::Result<(ResponseEnvelope, bool)> {
+    fn dispatch(&mut self, caller: &Caller, envelope: RequestEnvelope, denial: Option<ProtocolError>) -> anyhow::Result<(ResponseEnvelope, bool)> {
         let id = envelope.id;
         let request = envelope.request;
         if !request.is_read_only() {
             self.journal.append(&JournalEntry::new("request_received").operator(caller.uid, &caller.user)
                 .details(serde_json::json!({"op": request.name()})))?;
+        }
+        if let Some(error) = denial {
+            let entry = JournalEntry::new("request_denied").operator(caller.uid, &caller.user)
+                .details(serde_json::json!({"op": request.name(), "action": request.needs_polkit_action(), "reason": &error.message}));
+            return self.finish(Handled { response: ResponseEnvelope::error(id, error), events: Vec::new(), effects: Vec::new(), journal: vec![entry] });
         }
         // Phase 3 enables apply (termios + env file).  Enforcement-adjacent
         // writes stay unavailable until their phase gates pass.
@@ -510,6 +549,131 @@ impl Drop for SocketGuard {
     fn drop(&mut self) {
         if fs::symlink_metadata(&self.path).is_ok_and(|metadata| metadata.file_type().is_socket() && metadata.dev() == self.device && metadata.ino() == self.inode) {
             let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::{finish_authorization, guarded_caller};
+    use devguard_core::{DeviceConfig, DeviceId, DeviceKind, IdRole, Request};
+    use tokio::sync::watch;
+
+    fn config() -> DeviceConfig {
+        DeviceConfig {
+            name: "radio-1".into(), kind: DeviceKind::Radio, description: None,
+            ids: vec![DeviceId { vid: "1a86".into(), pid: "7523".into(), serial: None, path: Some("pci-port-1".into()), role: IdRole::App }],
+            serial: DeviceKind::Radio.default_serial(), access: Default::default(),
+        }
+    }
+
+    fn peer() -> Peer {
+        let (stream, _other) = tokio::net::UnixStream::pair().unwrap();
+        Peer::from_stream(&stream).unwrap()
+    }
+
+    fn caller() -> Caller {
+        Caller { uid: 1000, user: "dev".into(), groups: vec![1000], polkit_authorized: false }
+    }
+
+    #[test]
+    fn authorization_marks_the_caller_and_has_no_denial() {
+        let caller = caller();
+        let result = finish_authorization(caller.clone(), Ok(caller.clone()), Decision::Authorized, "dev.devguard.modify");
+        assert!(result.caller.polkit_authorized);
+        assert!(result.denial.is_none());
+    }
+
+    #[test]
+    fn a_denied_decision_maps_to_an_actionable_unauthorized_error() {
+        let caller = caller();
+        let result = finish_authorization(caller.clone(), Ok(caller), Decision::Denied("polkit_not_authorized"), "dev.devguard.modify");
+        let error = result.denial.expect("denial error");
+        assert_eq!(error.code, "unauthorized");
+        assert!(error.message.contains("dev.devguard.modify") && error.message.contains("polkit_not_authorized"));
+        assert!(error.next_step.is_some());
+        assert!(!result.caller.polkit_authorized);
+    }
+
+    #[test]
+    fn an_identity_change_during_authorization_is_never_dispatched() {
+        let caller = caller();
+        let mut impersonated = caller.clone();
+        impersonated.uid += 1;
+        let result = finish_authorization(caller, Ok(impersonated), Decision::Authorized, "dev.devguard.pause");
+        let error = result.denial.expect("identity change must deny");
+        assert!(error.message.contains("identity changed"));
+    }
+
+    #[test]
+    fn a_peer_read_failure_during_authorization_is_a_denial() {
+        let caller = caller();
+        let failure = Err(std::io::Error::other("peer process exited"));
+        let result = finish_authorization(caller, failure, Decision::Authorized, "dev.devguard.modify");
+        assert!(result.denial.is_some());
+    }
+
+    #[tokio::test]
+    async fn read_only_requests_are_not_subjected_to_polkit() {
+        let peer = peer();
+        let (_sender, mut closing) = watch::channel(false);
+        let result = guarded_caller(&peer, AccessPolicy::System { gid: 0 }, &Request::List, &Checker::default(), &mut closing).await.unwrap();
+        assert!(result.denial.is_none());
+        assert!(!result.caller.polkit_authorized);
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_owner_is_authorized_without_external_polkit() {
+        let peer = peer();
+        let (_sender, mut closing) = watch::channel(false);
+        let result = guarded_caller(&peer, AccessPolicy::Sandbox { uid: peer.uid, gid: peer.gid },
+                                   &Request::SaveDevice { config: config(), note: None },
+                                   &Checker::default(), &mut closing).await.unwrap();
+        assert!(result.denial.is_none() && result.caller.polkit_authorized);
+    }
+
+    #[tokio::test]
+    async fn a_system_root_is_authorized_without_external_polkit() {
+        // The unit test cannot fabricate uid 0 without root; instead assert the
+        // non-root System path still consults the checker (fixture exit 0 grants).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pkcheck");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let checker = Checker::fixture(path, std::time::Duration::from_secs(2));
+        let peer = peer();
+        let (_sender, mut closing) = watch::channel(false);
+        let result = guarded_caller(&peer, AccessPolicy::System { gid: 0 },
+                                   &Request::SaveDevice { config: config(), note: None },
+                                   &checker, &mut closing).await.unwrap();
+        assert!(result.denial.is_none() && result.caller.polkit_authorized);
+    }
+
+    #[tokio::test]
+    async fn a_non_read_only_request_without_an_action_is_refused_fail_closed() {
+        // Every current mutation has an action; this guards against adding a
+        // future one and forgetting its polkit binding.
+        use devguard_core::{DeviceId, DeviceKind, PauseKind, Request, IdRole};
+        let cfg = devguard_core::DeviceConfig {
+            name: "radio-1".into(), kind: DeviceKind::Radio, description: None,
+            ids: vec![DeviceId { vid: "1a86".into(), pid: "7523".into(), serial: None, path: Some("port-1".into()), role: IdRole::App }],
+            serial: DeviceKind::Radio.default_serial(), access: Default::default(),
+        };
+        let mutations = [
+            Request::SaveDevice { config: cfg.clone(), note: None },
+            Request::DeleteDevice { name: "radio-1".into(), note: None },
+            Request::Apply { name: None, devnode: None },
+            Request::Pause { kind: PauseKind::Service, minutes: 1, note: None },
+            Request::Resume { note: None },
+            Request::PolicySet { mode: devguard_core::PolicyMode::Audit, note: None },
+            Request::Shutdown { release_blocked: true, note: None },
+            Request::BlockDevice { devnode: "/dev/ttyUSB0".into(), note: None },
+            Request::AllowDevice { devnode: "/dev/ttyUSB0".into(), note: None },
+        ];
+        for request in mutations {
+            assert!(!request.is_read_only());
+            assert!(request.needs_polkit_action().is_some(), "mutation {} must carry a polkit action", request.name());
         }
     }
 }

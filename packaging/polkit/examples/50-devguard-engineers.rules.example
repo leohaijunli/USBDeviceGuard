@@ -1,0 +1,26 @@
+// OPTIONAL SITE POLICY, NOT INSTALLED BY THE APPLICATION.
+// An administrator may review and explicitly rename/copy it into rules.d.
+// Trusted local, active devguard-group members can use these domain actions
+// without an administrator prompt. They still cannot bypass daemon safety gates.
+polkit.addRule(function(action, subject) {
+    if (!subject.local || !subject.active || !subject.isInGroup("devguard")) {
+        return;
+    }
+
+    switch (action.id) {
+    case "dev.devguard.modify":
+    case "dev.devguard.pause":
+    case "dev.devguard.service-stop":
+        return polkit.Result.YES;
+    }
+
+    // Start only this existing unit. Stop remains the audited shutdown RPC;
+    // direct StopUnit/restart/unit-file/environment management is not granted.
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "devguardd.service" &&
+        action.lookup("verb") === "start") {
+        return polkit.Result.YES;
+    }
+    // In systemd 259, manage-unit-files supplies no per-unit details.
+    // Granting it here would authorize managing ALL service unit files.
+});

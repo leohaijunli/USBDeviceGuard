@@ -214,16 +214,21 @@ impl Request {
     }
 
     pub fn needs_polkit_action(&self) -> Option<&'static str> {
+        self.polkit_action().map(crate::PolkitAction::id)
+    }
+
+    pub fn polkit_action(&self) -> Option<crate::PolkitAction> {
+        use crate::PolkitAction;
         match self {
             Request::Pause { .. }
             | Request::Resume { .. }
             | Request::BlockDevice { .. }
-            | Request::AllowDevice { .. } => Some("dev.devguard.pause"),
-            Request::Shutdown { .. } => Some("dev.devguard.service-stop"),
+            | Request::AllowDevice { .. } => Some(PolkitAction::Pause),
+            Request::Shutdown { .. } => Some(PolkitAction::ServiceStop),
             Request::SaveDevice { .. } | Request::DeleteDevice { .. } | Request::Apply { .. } => {
-                Some("dev.devguard.modify")
+                Some(PolkitAction::Modify)
             }
-            Request::PolicySet { .. } => Some("dev.devguard.modify"),
+            Request::PolicySet { .. } => Some(PolkitAction::Modify),
             _ => None,
         }
     }

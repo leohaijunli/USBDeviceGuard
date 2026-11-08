@@ -26,7 +26,7 @@
 | 2 daemon + udev | WSL 部署路径通过；目标桌面 Linux 与人工物理插拔待补 | 已验证 system 模式规则生成/reload、`udevadm verify/test`、usbipd 重连后的 symlink/dialout/0660/MM 标记及事件流；这些是 WSL 真实 udev 证据，不等同 Arch/Omarchy 或人工拔线验收（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`、`linux-system-mode-2026-11-08.md`） |
 | 3 termios/check/run | 完成（pty 门禁 + 真机 apply/check/run 验收通过） | WSL 116 项测试（含 pty 9 + run 端到端 2）；真机 apply 写入 115200 8N1 raw 并回读验证、偏差注入/检出/修复闭环、run 的 fd 继承在实机验证（`artifacts/linux-real-termios-2026-11-08.md`）；实测 cdc_acm/vhci 不保持 CS7，5-7 数据位申请将得到明确回读错误 |
 | 3.5 P0 修复 | 完成 | 允许表按 devnode 拔出即清（回归测试覆盖复插再拦截）、store 读取失败 fail-closed（`store_unavailable` 审计 + list 以 problem 展示）、CDC-ACM learn 草稿 baud=n/a |
-| 4 事件/polkit/systemd | 部分完成：systemd 软件实现与 3/10 轮自动 apply 通过 | Linux 132、Windows 78 项 Rust 测试及两端 clippy 通过，Python 续跑测试 8 项通过；剩余重连及服务恢复/停止实测、polkit、启动对账仍待完成。详见 [`systemd.md`](systemd.md) |
+| 4 事件/polkit/systemd | 部分完成：systemd 软件与 polkit 动作/授权边界完成，真机后续验收暂缓 | Linux 151、Windows 80 项 Rust 测试及两端 clippy 通过，Python 续跑测试 8 项通过；剩余重连及服务恢复/停止实测、真实 polkit agent、启动对账仍待完成。详见 [`systemd.md`](systemd.md) |
 | 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境；完成后发布 alpha |
 | 6 正式 GUI | 未开始 | 当前 GUI 仅最小 NSH 骨架 |
 | 7 打包/文档 | 未开始 | 发布计划见 [`release.md`](release.md)；**本阶段执行 SerialGuard 机械改名** |
@@ -47,8 +47,16 @@
 - WSL 已安装并启动 notify 版本服务；自动 apply 真机检查点记录了 3 个完整重连周期，每次只出现一组 removed/added，symlink/access/MM/termios 全 ok，自动操作记录 uid=0。第 4 轮只记录到 removed 后服务端重启中断，不能计为通过。原始文件：`artifacts/systemd-acceptance-2026-11-08.events.jsonl`。
 - 设备随后不在 Windows Connected 清单中，只剩历史共享记录；工程师选择先完成软件部分。本轮未补做剩余真机测试，亦未将 WSL 重连记为人工物理插拔。
 - 新增 `scripts/verify-linux-systemd.py`：精确核对 BUSID + PnP serial、保持 WSL 验证连接、明确 opt-in、备份旧安装、逐步落盘、`--resume-from` 跳过完整周期。测试模式有时限等待，非 daemon 的设备轮询。恢复后用新输出文件继续，若新构建与已安装文件不同，不能使用 `--skip-install`。
-- 最新验证：core/daemon/CLI Linux **132**、Windows **78** 项通过，两端 `clippy --all-targets --locked -- -D warnings` 通过；续跑检查点的 Python 离线测试 **8** 项在两端通过。GUI 未在本轮改动或重新验收。
-- 后续门禁：余下 7 轮 WSL 重连、真实 systemd 的 SIGKILL 自愈与正常 shutdown 不重启、停止后插入不拉起 daemon；polkit 策略/agent、启动对账、GUI 重连及目标桌面验收另行推进。
+- 最新验证：core/daemon/CLI Linux **151**、Windows **80** 项通过，两端 `clippy --all-targets --locked -- -D warnings` 通过；续跑检查点的 Python 离线测试 **8** 项在两端通过。GUI 未在本轮改动或重新验收。
+- 后续门禁：余下 7 轮 WSL 重连、真实 systemd 的 SIGKILL 自愈与正常 shutdown 不重启、停止后插入不拉起 daemon；真实 polkit agent 提示、启动对账、GUI 重连及目标桌面验收另行推进。
+
+## 2026-11-08：阶段 4 polkit 动作定义与授权边界
+
+- 新增 `devguard-core/src/authorization.rs`：固定 5 个域动作 ID（`modify`/`pause`/`service-stop`/`service-start`/`service-autostart`），`Request::polkit_action()` 与 `needs_polkit_action()` 改用统一枚举，避免字符串四处分散。
+- `packaging/polkit/dev.devguard.policy`：默认 `auth_admin`，无缓存 grant；`packaging/polkit/examples/50-devguard-engineers.rules.example` 仅让本地活跃的 devguard 组员免密执行 3 个域动作和**启动 `devguardd.service`**。systemd 259 的 `manage-unit-files` 不提供目标 unit 细节，免密授权它等于可管理所有 unit 文件，因此自启只做 admin，不加入示例规则。
+- daemon 用有界 `pkcheck` 封装：非零退出、缺二进制、超时、被杀、停止中一律拒绝；`--process pid,start-time,uid` 与 socket peer 真实身份核对，认证期间进程身份变化即拒绝（不沿用认证前快照）。校验器退出码 2（无 agent）/3（用户取消）映射为不同拒绝理由。
+- 所有非只读请求都需动作 ID，未定义动作即拒绝（fail-closed），并有枚举测试防新增变操作漏绑定。`request_denied`/`request_received` 审计记录可信操作者、动作 ID 与原因。
+- 集成测试用 fixture 校验器验证端到端：拒绝时副作用不发生且按真实 uid 审计；授权通过时变更持久化并记录操作者。单元测试覆盖拒绝映射、身份漂移、读失败、停止取消未决校验器、超时回收。
 
 ## 2026-11-07：本机 WSL 与阶段 2 续开发
 
