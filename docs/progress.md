@@ -4,7 +4,7 @@
 
 ## 当前门禁：阶段 4（部分完成；真机后续验收暂缓）
 
-阶段 2/3 的 WSL 开发链路已验证；目标 Arch/Wayland 和人工物理插拔仍未验收。当前已完成 systemd 单元、就绪通知、安全 socket 接管及离线回归；3/10 轮 WSL 重连自动 apply 通过。设备离线后，工程师选择先完成软件部分，剩余 7 轮、SIGKILL 恢复、正常停止及停止期间热插拔实测等待设备接回。polkit 策略和桌面 agent、跨重启对账及 GUI 重连也仍待完成。
+阶段 2/3 的 WSL 开发链路已验证；目标 Arch/Wayland 和人工物理插拔仍未验收。systemd/polkit 软件边界已实现；3/10 轮 WSL 重连自动 apply 通过。设备离线后，剩余 7 轮、真实 systemd 恢复/停止及桌面 agent 等待后续验收。用户现要求先做 GUI：第一批查看/诊断页面和订阅重连已接通，阶段 4/5 门禁并未因此通过。
 
 需求基线见 [`requirements.md`](requirements.md)。工程师先前暂缓阶段 0 的 Linux 桌面验收并要求继续开发；该偏离保留，不能以 WSL 软件测试代替 Arch/Omarchy/Wayland 验收。
 
@@ -26,9 +26,9 @@
 | 2 daemon + udev | WSL 部署路径通过；目标桌面 Linux 与人工物理插拔待补 | 已验证 system 模式规则生成/reload、`udevadm verify/test`、usbipd 重连后的 symlink/dialout/0660/MM 标记及事件流；这些是 WSL 真实 udev 证据，不等同 Arch/Omarchy 或人工拔线验收（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`、`linux-system-mode-2026-11-08.md`） |
 | 3 termios/check/run | 完成（pty 门禁 + 真机 apply/check/run 验收通过） | WSL 116 项测试（含 pty 9 + run 端到端 2）；真机 apply 写入 115200 8N1 raw 并回读验证、偏差注入/检出/修复闭环、run 的 fd 继承在实机验证（`artifacts/linux-real-termios-2026-11-08.md`）；实测 cdc_acm/vhci 不保持 CS7，5-7 数据位申请将得到明确回读错误 |
 | 3.5 P0 修复 | 完成 | 允许表按 devnode 拔出即清（回归测试覆盖复插再拦截）、store 读取失败 fail-closed（`store_unavailable` 审计 + list 以 problem 展示）、CDC-ACM learn 草稿 baud=n/a |
-| 4 事件/polkit/systemd | 部分完成：systemd 软件与 polkit 动作/授权边界完成，真机后续验收暂缓 | Linux 151、Windows 80 项 Rust 测试及两端 clippy 通过，Python 续跑测试 8 项通过；剩余重连及服务恢复/停止实测、真实 polkit agent、启动对账仍待完成。详见 [`systemd.md`](systemd.md) |
+| 4 事件/polkit/systemd | 部分完成：软件与授权边界完成，真机后续验收暂缓 | core/daemon/CLI Linux 153、Windows 80 项回归通过；剩余重连及真实 systemd 恢复/停止、桌面 agent、启动对账待完成。详见 [`systemd.md`](systemd.md) |
 | 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境；完成后发布 alpha |
-| 6 正式 GUI | 未开始 | 当前 GUI 仅最小 NSH 骨架 |
+| 6 正式 GUI | 用户要求提前推进，第一批查看/诊断与订阅接入完成 | GUI Linux headless/隔离 daemon 52、Windows 51 项通过；登记/编辑/授权应用、服务控制及原生 Linux 验收未完成，详见 [`gui-daemon.md`](gui-daemon.md) |
 | 7 打包/文档 | 未开始 | 发布计划见 [`release.md`](release.md)；**本阶段执行 SerialGuard 机械改名** |
 
 ## 记录约定
@@ -37,6 +37,17 @@
 - 每个实测记录命令、环境、结果；失败保留原因和下一步。
 - 不把待办项、空入口或模拟设备计为完成的产品功能。
 - 新结果更新本文件与 [`nsh-spike.md`](nsh-spike.md)，设计冲突更新 [`design.md`](design.md)。
+
+## 2026-11-08：GUI 第一批真实数据页面
+
+- 用户明确选择先做 GUI；仅提前接入 list/show/learn/check/log/doctor/subscribe 读取接口。没有 GUI 写操作、没有假数据回退，也未启用阶段 5。
+- Linux 默认进入 Devices / Logs / Policy and diagnostics；Windows 保持只读诊断和阶段 0 工具。验证根组件单独命名 ValidationApp，原生阶段 0 脚本选择专用 `validation/nsh.json`。
+- 快照新增可选 `event_sequence`，由 daemon 单一 worker 写入。GUI 先订阅再取快照，严格核对游标和编号；旧 daemon 缺字段明确报错，需要与新版 GUI 同步更新。
+- GUI 自有线程承载 Tokio，通过有界通道更新 engine signals。意外断开退避重连，明确停止不自动重连/启动；按身份保留选择，拒绝过期详情结果，查询中禁用重复提交，退出 GUI 不停止 daemon。
+- 最新：Linux/WSL **205** 项（153 核心链路 + 52 GUI）通过，Windows **80** 核心链路 + **51** GUI 通过，两端 clippy 干净。测试 daemon 使用隔离文件树和惰性 DeviceIo，不计作真机通过。
+- 完整回归发现旧 bind/drop 遗留 socket fixture 的子进程继承窗口；最小例子复现后修正 fixture，并补上“子进程仍监听不得接管”的回归；生产安全规则未改宽。
+- GTK 开发文件和当前 PATH 的 NSH CLI 不可用，Linux desktop 构建、截图、原生输入、Wayland/托盘及 TSX CLI 测试仍未完成；不以 headless 冒充这些结果。未安装/改写主机服务、规则或 polkit，未继续真机插拔。
+- 下一批：登记/编辑与差异确认、授权保存/应用；服务控制和完整 GUI 验收随后推进。启动与边界见 [`gui-daemon.md`](gui-daemon.md)。
 
 ## 2026-11-08：阶段 4 systemd 软件收尾
 

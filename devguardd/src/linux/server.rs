@@ -453,6 +453,7 @@ impl<I: DeviceIo> Runtime<I> {
     fn dispatch(&mut self, caller: &Caller, envelope: RequestEnvelope, denial: Option<ProtocolError>) -> anyhow::Result<(ResponseEnvelope, bool)> {
         let id = envelope.id;
         let request = envelope.request;
+        let snapshot = matches!(request, Request::List);
         if !request.is_read_only() {
             self.journal.append(&JournalEntry::new("request_received").operator(caller.uid, &caller.user)
                 .details(serde_json::json!({"op": request.name()})))?;
@@ -474,7 +475,15 @@ impl<I: DeviceIo> Runtime<I> {
             };
             Handled { response: ResponseEnvelope::error(id, error), events: Vec::new(), effects: Vec::new(), journal: vec![JournalEntry::new(event).operator(caller.uid, &caller.user).details(serde_json::json!({"op": request.name()}))] }
         };
-        self.finish(handled)
+        let (mut response, shutdown) = self.finish(handled)?;
+        if snapshot && response.ok {
+            // This worker serializes snapshots and events. Clients subscribe
+            // first, then discard buffered events through this exact barrier.
+            if let Some(fields) = response.data.as_mut().and_then(serde_json::Value::as_object_mut) {
+                fields.insert("event_sequence".into(), self.sequence.into());
+            }
+        }
+        Ok((response, shutdown))
     }
 
     fn finish(&mut self, handled: Handled) -> anyhow::Result<(ResponseEnvelope, bool)> {

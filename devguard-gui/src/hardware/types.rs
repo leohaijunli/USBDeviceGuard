@@ -30,6 +30,7 @@ pub(crate) struct UsbSnapshot {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg(any(target_os = "windows", test))]
 pub(crate) enum HardwareEvent {
     Snapshot { snapshot: UsbSnapshot },
     WatchWarning { message: String },

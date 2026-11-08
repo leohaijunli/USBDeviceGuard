@@ -568,7 +568,9 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "clap",
  "devguard-core",
+ "devguardd",
  "env_logger",
  "libc",
  "nsh-base",
@@ -580,6 +582,7 @@ dependencies = [
  "nsh-testing",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "zbus",
 ]

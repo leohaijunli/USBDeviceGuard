@@ -1,7 +1,10 @@
-use nsh_core::{prelude::*, time::now};
+use nsh_core::prelude::*;
 
+#[cfg(any(target_os = "windows", test))]
 use super::arrivals::Arrivals;
-use super::types::{HardwareEvent, UsbSerialDevice, UsbSnapshot};
+use super::types::{UsbSerialDevice, UsbSnapshot};
+#[cfg(any(target_os = "windows", test))]
+use {super::types::HardwareEvent, nsh_core::time::now};
 
 /// Read-only device facts. This store never calls devguard's modify protocol.
 #[derive(Clone, Copy)]
@@ -11,6 +14,7 @@ pub(crate) struct HardwareStore {
     loading: Signal<bool>,
     watching: Signal<bool>,
     enabled: bool,
+    #[cfg(any(target_os = "windows", test))]
     arrivals: Stored<Arrivals>,
     pending_notices: Signal<Vec<UsbSerialDevice>>,
 }
@@ -22,6 +26,7 @@ impl HardwareStore {
             error: signal(None),
             loading: signal(enabled),
             watching: signal(false),
+            #[cfg(any(target_os = "windows", test))]
             arrivals: stored(Arrivals::default()),
             pending_notices: signal(Vec::new()),
             enabled,
@@ -158,11 +163,11 @@ impl HardwareStore {
     }
 
     pub(crate) fn refresh(self) {
-        if self.loading() || !self.enabled {
-            return;
-        }
         #[cfg(target_os = "windows")]
         {
+            if self.loading() || !self.enabled {
+                return;
+            }
             self.loading.set(true);
             self.error.set(None);
             let (sender, mut receiver) = tokio::sync::mpsc::channel::<HardwareEvent>(4);
@@ -183,6 +188,7 @@ impl HardwareStore {
         }
     }
 
+    #[cfg(any(target_os = "windows", test))]
     fn receive(self, event: HardwareEvent) {
         match event {
             HardwareEvent::Snapshot { snapshot } => batch(|| {

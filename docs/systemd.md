@@ -52,8 +52,10 @@ writes remain disabled. Unregistered devices cannot be applied by this hook.
 
 ## Current acceptance evidence
 
-- Linux core/daemon/CLI: **132 Rust tests**; Windows: **78 Rust tests**;
-  clippy with `-D warnings` passes on both.
+- Linux core/daemon/CLI: **153 Rust tests**; Windows: **80 Rust tests**.
+- Read-only GUI integration has separate software tests; see
+  [GUI connection and verification](gui-daemon.md). It is not native desktop or
+  real systemd lifecycle acceptance.
 - The Python checkpoint/resume helper: **8 offline tests**, on both hosts.
 - WSL notify service startup and **3 complete reconnect cycles** have passed:
   one remove/add pair each; symlink, group/mode, ModemManager flag and termios
@@ -67,8 +69,10 @@ writes remain disabled. Unregistered devices cannot be applied by this hook.
   are pending.** Unit-file assertions are not runtime proof of these behaviors.
 
 WSL usbipd reconnection is not a manual physical unplug test or Arch/Wayland
-acceptance. Polkit policy, desktop authorization prompts, startup reconciliation
-and GUI reconnect behavior also remain pending.
+acceptance. Polkit policy definitions are implemented; desktop authorization
+prompts, startup reconciliation and native GUI/service-control acceptance remain
+pending. GUI reconnect behavior has been tested against an isolated daemon,
+not yet accepted with a real target desktop/systemd failure cycle.
 
 ## Resumable hardware verification
 

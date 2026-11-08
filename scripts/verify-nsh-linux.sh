@@ -58,7 +58,7 @@ case "$step" in
       exit 1
     fi
     export GDK_BACKEND=wayland
-    nsh test nsh.json --target linux < "$root/scripts/nsh-native.steps.js"
+    nsh test validation/nsh.json --target linux < "$root/scripts/nsh-native.steps.js"
     ;;
   --run)
     cargo run -p devguard-gui

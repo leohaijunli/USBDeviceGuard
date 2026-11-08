@@ -456,6 +456,10 @@ pub struct ListResponse {
     pub paused_allowed: Vec<OnlineDevice>,
     /// Snapshot metadata for the GUI: the daemon always sends fresh data.
     pub generated_at: String,
+    /// Events through this sequence are already reflected in this snapshot.
+    /// Older daemons omit it; event-driven GUIs must not guess a cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -623,6 +627,7 @@ mod tests {
                 problems: Vec::new(),
                 paused_allowed: Vec::new(),
                 generated_at: now_rfc3339(),
+                event_sequence: None,
             },
         );
         let line = serde_json::to_string(&response).unwrap();

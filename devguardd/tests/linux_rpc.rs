@@ -34,6 +34,20 @@ fn config() -> DeviceConfig {
     }
 }
 
+/// Construct the inode of an abandoned socket without ever opening a
+/// listening fd in the multithreaded test process. A concurrent fork can
+/// briefly inherit a normal bind/drop fixture until the child's exec.
+fn abandoned_socket(path: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let pathname = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: valid NUL-terminated path in this test's private temporary tree;
+    // S_IFSOCK creates no hardware device node and opens no listening fd.
+    assert_eq!(unsafe { libc::mknod(pathname.as_ptr(), libc::S_IFSOCK | 0o600, 0) }, 0,
+        "could not create abandoned socket fixture: {}", std::io::Error::last_os_error());
+    let error = std::os::unix::net::UnixStream::connect(path).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ECONNREFUSED));
+}
+
 struct Harness {
     _dir: tempfile::TempDir,
     paths: Paths,
@@ -332,15 +346,13 @@ async fn a_polkit_grant_allows_a_mutation_and_audits_the_authorized_operator() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_socket_is_taken_over_but_a_live_daemon_never_is() {
-    use std::os::unix::net::UnixListener as StdListener;
 
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::rooted(dir.path());
     paths.create_dirs().unwrap();
 
     // A socket file left behind by a killed daemon: exists, nobody listens.
-    let leftover = StdListener::bind(paths.socket()).unwrap();
-    drop(leftover);
+    abandoned_socket(&paths.socket());
     assert!(paths.socket().exists(), "the stale socket file must still exist");
 
     // The restarted daemon takes it over instead of crash-looping.
@@ -350,6 +362,39 @@ async fn a_stale_socket_is_taken_over_but_a_live_daemon_never_is() {
     // A second bind while the first daemon is alive must still be refused.
     let second = Server::bind(paths, AccessPolicy::sandbox());
     assert!(second.is_err(), "a live daemon's socket must not be stolen");
+}
+
+#[tokio::test]
+async fn a_listener_inherited_by_a_child_is_not_an_abandoned_socket() {
+    use std::os::{fd::OwnedFd, unix::net::UnixListener as StdListener};
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+    let listener: OwnedFd = StdListener::bind(paths.socket()).unwrap().into();
+    let mut child = tokio::process::Command::new("/bin/sleep").arg("60")
+        .stdin(std::process::Stdio::from(listener)).kill_on_drop(true).spawn().unwrap();
+    // The parent has closed its handle, but fd 0 still listens in the child.
+    let error = Server::bind(paths.clone(), AccessPolicy::sandbox()).err().expect("live child listener must be preserved");
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    assert!(paths.socket().exists());
+    child.start_kill().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshots_expose_the_worker_event_barrier_without_breaking_cli_responses() {
+    let harness = Harness::start(AccessPolicy::sandbox());
+    let socket = harness.paths.socket();
+    tokio::task::spawn_blocking(move || {
+        let mut client = Client::connect(socket).unwrap();
+        let before: devguard_core::protocol::ListResponse = client.request(Request::List).unwrap().into_data().unwrap();
+        assert_eq!(before.event_sequence, Some(0));
+        client.request(Request::SaveDevice { config: config(), note: None }).unwrap();
+        let after: devguard_core::protocol::ListResponse = client.request(Request::List).unwrap().into_data().unwrap();
+        assert_eq!(after.event_sequence, Some(1));
+        assert_eq!(after.devices[0].name, "radio-1");
+    }).await.unwrap();
+    harness.finish().await;
 }
 
 #[tokio::test]
@@ -409,14 +454,12 @@ async fn socket_recovery_does_not_remove_a_hard_link_to_another_socket() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_concurrent_restarts_cannot_steal_each_others_socket() {
-    use std::os::unix::net::UnixListener as StdListener;
     use std::sync::{Arc, Barrier};
 
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::rooted(dir.path());
     paths.create_dirs().unwrap();
-    let leftover = StdListener::bind(paths.socket()).unwrap();
-    drop(leftover);
+    abandoned_socket(&paths.socket());
     let barrier = Arc::new(Barrier::new(2));
     let contenders: Vec<_> = (0..2).map(|_| {
         let paths = paths.clone();

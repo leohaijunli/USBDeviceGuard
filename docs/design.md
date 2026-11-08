@@ -1,6 +1,6 @@
 # devguard 设计决策与实测记录
 
-基线：[`requirements.md`](requirements.md)。当前处于阶段 4（systemd 部分实现）；本文中的软件验证不能替代 Linux 真机或桌面验收。
+基线：[`requirements.md`](requirements.md)。阶段 4 门禁尚未收口；用户现要求提前推进 GUI，只使用已通过软件门禁的读取能力。本文中的软件验证不能替代 Linux 真机或桌面验收。
 
 ## 开发顺序与环境
 
@@ -83,6 +83,16 @@ NSH 固定使用当前已安装的 `0.4.0`，精确 API 以该版本 crate 源�
 - 列表用稳定 domain key 与虚拟化；回收单元读取绑定中的当前 index，不保存每行状态。
 - NSH signals 只在 engine 线程更新；后台 socket / I/O 通过可取消异步通道送入 `spawn`，没有定时读取队列或状态轮询。
 - spike 只验证组件和事件传递，清晰显示“阶段 0 验证”；不能显示为真实设备状态。
+
+### GUI 先行的读取边界与快照同步（2026-11-08）
+
+- 默认 Linux App 使用真实 daemon 工作区；Windows 保持只读诊断。ValidationApp 是显式测试工具，不作为离线/权限错误的回退。
+- 有界 OS 线程运行自己的 Tokio runtime，两条 Unix socket 分离订阅与查询；只有读取操作的枚举可进入 GUI bridge。不得在 UI 中自报操作者或直接打开/写设备。
+- list 增加可选 `event_sequence`：worker 返回快照时的事件边界，先订阅后快照的客户端跳过被包含的排队事件。编号间断需要重新同步，不能对 devnode 复用的旧 remove 盲目重放。旧 CLI 解码仍兼容；GUI 对无游标 daemon 拒绝猜测。
+- 选择以登记名、VID:PID+serial 或无 serial 时的 ID_PATH 为键。重复身份的在线端口归在同一读取对象；保存/应用工作流必须进一步明确目标端口，不在本次读取入口中执行。
+- 只在新的选择/快照/事件到达时加载详情，旧票据和旧连接回复不覆盖新状态。日志草稿与已提交过滤器分离，打字不发送查询；执行中有明确禁用状态。
+- 确切 service_stopping 使 GUI 停止自动重连；未知掉线仅标未知并退避重连，从不启动 systemd。原生停止/自启控制和可信离线动作审计仍属后续门禁。
+- 原生 GTK 不可用时采用显式 headless 构建选项，不把依赖缺失伪装成成功桌面应用。完整范围及验证见 [`gui-daemon.md`](gui-daemon.md)。
 
 ## NSH 能力缺口（待版本源码核验）
 

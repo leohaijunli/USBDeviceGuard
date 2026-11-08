@@ -385,6 +385,7 @@ impl Daemon {
                 problems,
                 paused_allowed,
                 generated_at: devguard_core::util::now_rfc3339(),
+                event_sequence: None,
             },
         )
     }

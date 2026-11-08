@@ -1,10 +1,11 @@
 //! Phase 0 read-only diagnostics, separate from the Linux daemon protocol.
 
+#[cfg(any(target_os = "windows", test))]
 mod arrivals;
 mod store;
-mod types;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod types;
 #[cfg(target_os = "windows")]
 mod windows;
 
