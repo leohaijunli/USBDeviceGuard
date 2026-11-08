@@ -116,6 +116,16 @@ pub struct BlockedDevice {
     pub reason: String,
 }
 
+/// An unregistered device currently allowed to operate: released by a
+/// pause, an operator decision or a refused enforcement attempt.  Keyed
+/// like enforcement (USB path first) but remembering the devnode, so an
+/// unplug clears the entry even when the key is a USB path — an allowance
+/// does not survive a replug (section 4.2: "keep allowing until unplugged").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedEntry {
+    pub devnode: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Daemon {
     pub paths: Paths,
@@ -126,8 +136,9 @@ pub struct Daemon {
     /// Devices currently deauthorized in enforce mode.
     pub blocked: HashMap<String, BlockedDevice>,
     /// Unregistered devices allowed by an operator decision or a pause.
-    /// `true`: allowed until unplugged (pause allowances persist as such).
-    pub allowed: HashMap<String, bool>,
+    /// Keyed like enforcement (USB path when known); each entry remembers
+    /// the devnode it was granted for so an unplug ends the allowance.
+    pub allowed: HashMap<String, AllowedEntry>,
     /// Online device snapshots, for `list` and pause bookkeeping.
     pub last_online: Vec<OnlineDevice>,
 }
@@ -252,11 +263,14 @@ impl Daemon {
 
     pub(crate) fn online_with_status(&mut self, io: &mut dyn DeviceIo) -> Result<Vec<OnlineDevice>, String> {
         let facts = io.enumerate()?;
-        Ok(self.online_from_facts(facts, io))
+        self.online_from_facts(facts, io)
     }
 
-    fn online_from_facts(&mut self, facts: Vec<UdevFacts>, io: &mut dyn DeviceIo) -> Vec<OnlineDevice> {
-        let loaded = self.store().load().unwrap_or_default();
+    fn online_from_facts(&mut self, facts: Vec<UdevFacts>, io: &mut dyn DeviceIo) -> Result<Vec<OnlineDevice>, String> {
+        let loaded = self
+            .store()
+            .load()
+            .map_err(|error| format!("cannot read the configuration store: {error}"))?;
         let mut online = Vec::new();
         for fact in &facts {
             let mut device = fact.to_online();
@@ -314,16 +328,24 @@ impl Daemon {
             online.push(device);
         }
         self.last_online = online.clone();
-        online
+        Ok(online)
     }
 
-    fn handle_list(&mut self, io: &mut dyn DeviceIo, id: Option<u64>) -> Handled {
-        let online = match self.online_with_status(io) {
-            Ok(online) => online,
-            Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+    fn handle_list(&mut self, io: &mut dyn DeviceIo, _id: Option<u64>) -> Handled {
+        // list is the diagnostics surface: an unreadable store or failed
+        // enumeration is reported as a problem, never as a silent empty bus.
+        let (online, inventory_problem) = match self.online_with_status(io) {
+            Ok(online) => (online, None),
+            Err(error) => (Vec::new(), Some(error)),
         };
-        let loaded = self.store().load().unwrap_or_default();
-        let problems = loaded
+        let (loaded, store_problem) = match self.store().load() {
+            Ok(loaded) => (loaded, None),
+            Err(error) => (
+                devguard_core::LoadedStore::default(),
+                Some(format!("configuration store could not be read: {error}")),
+            ),
+        };
+        let mut problems = loaded
             .errors
             .iter()
             .map(|error| Problem {
@@ -338,16 +360,19 @@ impl Daemon {
                 severity: issue.severity,
                 next_step: Some(issue.next_step.clone()),
             }))
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(message) = store_problem.or(inventory_problem) {
+            problems.push(Problem {
+                file: Some(self.paths.devices_dir().to_string_lossy().into_owned()),
+                message,
+                severity: Severity::Error,
+                next_step: Some("check the permissions of the devices.d directory".into()),
+            });
+        }
         let paused_allowed = self
             .last_online
             .iter()
-            .filter(|device| {
-                self.allowed
-                    .get(&online_key(device))
-                    .copied()
-                    .unwrap_or(false)
-            })
+            .filter(|device| self.allowed.contains_key(&online_key(device)))
             .cloned()
             .collect();
         Handled::ok(
@@ -385,7 +410,10 @@ impl Daemon {
             Ok(facts) => facts,
             Err(error) => return Handled::err(id, ProtocolError::internal(error)),
         };
-        let online = self.online_from_facts(facts.clone(), io);
+        let online = match self.online_from_facts(facts.clone(), io) {
+            Ok(online) => online,
+            Err(error) => return Handled::err(id, ProtocolError::internal(error)),
+        };
         let mine: Vec<OnlineDevice> = online
             .iter()
             .filter(|device| {
@@ -571,7 +599,15 @@ impl Daemon {
                 ),
             );
         }
-        let loaded = self.store().load().unwrap_or_default();
+        let loaded = match self.store().load() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                return Handled::err(
+                    id,
+                    ProtocolError::internal(format!("cannot read the configuration store: {error}")),
+                )
+            }
+        };
         let (config, facts) = match (name, devnode) {
             (Some(name), _) => {
                 let Some(config) = loaded.get(&name).cloned() else {
@@ -667,7 +703,15 @@ impl Daemon {
     }
 
     fn handle_check(&mut self, io: &mut dyn DeviceIo, id: Option<u64>, name: Option<String>) -> Handled {
-        let loaded = self.store().load().unwrap_or_default();
+        let loaded = match self.store().load() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                return Handled::err(
+                    id,
+                    ProtocolError::internal(format!("cannot read the configuration store: {error}")),
+                )
+            }
+        };
         let targets: Vec<DeviceConfig> = match name {
             Some(name) => match loaded.get(&name) {
                 Some(config) => vec![config.clone()],
@@ -687,7 +731,9 @@ impl Daemon {
             Ok(facts) => facts,
             Err(error) => return Handled::err(id, ProtocolError::internal(error)),
         };
-        self.online_from_facts(facts.clone(), io);
+        if let Err(error) = self.online_from_facts(facts.clone(), io) {
+            return Handled::err(id, ProtocolError::internal(error));
+        }
         let mut reports = Vec::new();
         let mut events = Vec::new();
         for config in &targets {
@@ -779,17 +825,21 @@ impl Daemon {
         if kind == PauseKind::Enforcement {
             for device in self.blocked.values() {
                 // Allowances are keyed like the enforcement map: USB path
-                // first, so a renumbered tty keeps its allowance.
-                released.push(
+                // first, so a renumbered tty keeps its allowance.  Each
+                // entry remembers the devnode it was granted for.
+                released.push((
                     if device.usb_path.is_empty() {
                         device.devnode.clone()
                     } else {
                         device.usb_path.clone()
                     },
-                );
+                    device.devnode.clone(),
+                ));
             }
             self.blocked.clear();
-            self.allowed.extend(released.iter().map(|key| (key.clone(), true)));
+            self.allowed.extend(released.iter().map(|(key, devnode)| {
+                (key.clone(), AllowedEntry { devnode: devnode.clone() })
+            }));
         }
         self.pause = Some(pause.clone());
         Handled::ok(id, PauseResponse { service: self.service_state() })
@@ -827,12 +877,7 @@ impl Daemon {
         let allowed: Vec<OnlineDevice> = self
             .last_online
             .iter()
-            .filter(|device| {
-                self.allowed
-                    .get(&online_key(device))
-                    .copied()
-                    .unwrap_or(false)
-            })
+            .filter(|device| self.allowed.contains_key(&online_key(device)))
             .cloned()
             .collect();
         Handled::ok(
@@ -868,12 +913,7 @@ impl Daemon {
         let allowed: Vec<OnlineDevice> = self
             .last_online
             .iter()
-            .filter(|device| {
-                self.allowed
-                    .get(&online_key(device))
-                    .copied()
-                    .unwrap_or(false)
-            })
+            .filter(|device| self.allowed.contains_key(&online_key(device)))
             .cloned()
             .collect();
         Some(
@@ -976,11 +1016,27 @@ impl Daemon {
 
     fn handle_doctor(&mut self, io: &mut dyn DeviceIo, id: Option<u64>) -> Handled {
         let mut items = io.doctor_probe();
-        let loaded = self.store().load().unwrap_or_default();
+        let loaded = match self.store().load() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                items.push(DoctorItem::new(
+                    "store",
+                    "configuration store could not be read",
+                    DoctorStatus::Error,
+                    error.to_string(),
+                ));
+                devguard_core::LoadedStore::default()
+            }
+        };
         let online = match self.online_with_status(io) {
             Ok(online) => online,
             Err(error) => {
-                items.push(DoctorItem::new("inventory", "USB enumeration failed", DoctorStatus::Error, error));
+                items.push(DoctorItem::new(
+                    "inventory",
+                    "USB enumeration or store access failed",
+                    DoctorStatus::Error,
+                    error,
+                ));
                 Vec::new()
             }
         };
@@ -1062,7 +1118,23 @@ impl Daemon {
                 ServiceStateResponse { service: self.service_state() },
             );
         }
-        let loaded = self.store().load().unwrap_or_default();
+        let loaded = match self.store().load() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // Fail closed: with an unreadable configuration store the
+                // daemon must not decide enforcement or trust "0 devices".
+                // The event stream stays quiet instead of lying about the
+                // device list; the journal records why.
+                return Handled::ok(
+                    None,
+                    ServiceStateResponse { service: self.service_state() },
+                )
+                .journal(
+                    JournalEntry::new("store_unavailable")
+                        .details(serde_json::json!({ "reason": error.to_string() })),
+                );
+            }
+        };
         let registered = loaded
             .devices
             .iter()
@@ -1088,7 +1160,7 @@ impl Daemon {
             .journal(JournalEntry::new("device_added").device(&fact.to_online()));
         }
         if self.pause.is_some() {
-            self.allowed.insert(key, true);
+            self.allowed.insert(key, AllowedEntry { devnode: fact.devnode.clone() });
             return Handled::ok(
                 None,
                 ServiceStateResponse { service: self.service_state() },
@@ -1099,7 +1171,7 @@ impl Daemon {
             })
             .journal(JournalEntry::new("allowed_during_pause").device(&fact.to_online()));
         }
-        if self.mode != PolicyMode::Enforce || self.allowed.get(&key).copied().unwrap_or(false) {
+        if self.mode != PolicyMode::Enforce || self.allowed.contains_key(&key) {
             return Handled::ok(
                 None,
                 ServiceStateResponse { service: self.service_state() },
@@ -1136,7 +1208,7 @@ impl Daemon {
             Err(reason) => {
                 // Refused (composite with non-serial interfaces, or an I/O
                 // error): never block blindly; surface it and keep it allowed.
-                self.allowed.insert(key, true);
+                self.allowed.insert(key, AllowedEntry { devnode: fact.devnode.clone() });
                 Handled::ok(
                     None,
                     ServiceStateResponse { service: self.service_state() },
@@ -1154,7 +1226,9 @@ impl Daemon {
     /// The monitor shell reports disappearance here.
     pub fn on_device_removed(&mut self, devnode: &str) -> Handled {
         self.blocked.retain(|_, device| device.devnode != devnode);
-        self.allowed.retain(|key, _| !key.contains(devnode));
+        // An allowance ends at unplug regardless of its key type: each
+        // entry remembers the devnode it was granted for.
+        self.allowed.retain(|_, entry| entry.devnode != devnode);
         self.last_online.retain(|device| device.devnode != devnode);
         Handled::ok(
             None,
@@ -1263,7 +1337,7 @@ impl Daemon {
                 );
             }
         }
-        self.allowed.insert(key, true);
+        self.allowed.insert(key, AllowedEntry { devnode: fact.devnode.clone() });
         Handled::ok(
             id,
             devguard_core::protocol::DeviceActionResponse {
@@ -1339,12 +1413,18 @@ fn draft_for(facts: &UdevFacts) -> DeviceConfig {
         },
         role: guess_role(facts),
     };
+    let mut serial = kind.default_serial();
+    if facts.is_cdc_acm {
+        // CDC-ACM does not report a verified line speed: the draft keeps
+        // `baud = "n/a"`, matching learn's own warning.
+        serial.baud = devguard_core::BaudRate::NotApplicable;
+    }
     DeviceConfig {
         name,
         kind,
         description: facts.model.clone(),
         ids: vec![id],
-        serial: kind.default_serial(),
+        serial,
         access: Default::default(),
     }
 }

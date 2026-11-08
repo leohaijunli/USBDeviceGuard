@@ -261,7 +261,16 @@ async fn enumeration_and_rule_failures_are_not_reported_as_success() {
     let socket = harness.paths.socket();
     tokio::task::spawn_blocking(move || {
         let mut client = Client::connect(socket).unwrap();
-        assert!(matches!(client.request(Request::List), Err(ClientError::Protocol(error)) if error.code == "internal_error"));
+        // List is the diagnostics surface: a failed enumeration must show up
+        // as a problem in an otherwise ok response, never as a silent
+        // empty bus and never as an opaque transport error.
+        let list: devguard_core::protocol::ListResponse = client.request(Request::List).unwrap().into_data().unwrap();
+        assert!(list.online.is_empty());
+        assert!(
+            list.problems.iter().any(|problem| problem.severity == devguard_core::Severity::Error && problem.message.contains("fixture enumeration failed")),
+            "{:?}",
+            list.problems
+        );
         let error = client.request(Request::SaveDevice { config: config(), note: None }).unwrap_err();
         assert!(matches!(error, ClientError::Protocol(error) if error.code == "rules_failed" && error.message.contains("configuration change is saved")));
         let log: LogResponse = client.request(Request::LogQuery { filter: LogFilter { event: Some("config_changed".into()), ..LogFilter::default() } }).unwrap().into_data().unwrap();

@@ -219,8 +219,7 @@ fn read_requests_need_the_devguard_group_or_polkit() {
 }
 
 #[test]
-fn learn_candidate_builds_a_draft_and_flags_physical_binding() {
-    let mut daemon = daemon();
+fn learn_candidate_builds_a_draft_and_flags_physical_binding() {    let mut daemon = daemon();
     let mut io = FakeIo::with_px4_and_adapter();
 
     let handled = daemon.handle(
@@ -740,4 +739,85 @@ fn check_returns_drift_events_for_subscribers() {
     io.check_drift = true;
     let handled = daemon.handle(&mut io, &group_caller(), Some(2), Request::Check { name: None });
     assert!(handled.events.iter().any(|event| matches!(event, Event::DriftDetected { .. })));
+}
+
+#[test]
+fn cdc_acm_drafts_keep_baud_na_instead_of_a_number() {
+    let mut daemon = daemon();
+    // ttyUSB0 in the fixture is a CDC-ACM device whose VID is not a known
+    // PX4 vendor: the draft kind is serial-adapter, whose default serial
+    // carries baud 115200.  The draft must override that to "n/a".
+    let mut io = FakeIo::with_px4_and_adapter();
+    let handled = daemon.handle(
+        &mut io,
+        &group_caller(),
+        Some(1),
+        Request::LearnCandidate { devnode: "/dev/ttyUSB0".into() },
+    );
+    let learn: devguard_core::protocol::LearnResponse = data_of(&handled);
+    assert_eq!(learn.draft.kind, DeviceKind::SerialAdapter);
+    assert_eq!(
+        learn.draft.serial.baud,
+        devguard_core::BaudRate::NotApplicable,
+        "a CDC-ACM draft must not claim a verified baud"
+    );
+    assert!(learn.warnings.iter().any(|warning| warning.contains("CDC-ACM")));
+}
+
+#[test]
+fn an_allowance_ends_at_unplug_even_when_keyed_by_usb_path() {
+    let mut daemon = daemon();
+    let mut io = FakeIo::with_px4_and_adapter();
+    daemon.mode = PolicyMode::Enforce;
+    let fact = facts("/dev/ttyUSB0", "1a86", "7523", None, Some("pci-1"));
+    daemon.on_device_facts(&mut io, &fact);
+    assert_eq!(daemon.blocked.len(), 1);
+
+    // The operator allows it; the allowance is keyed by the USB path.
+    let allowed = daemon.handle(
+        &mut io,
+        &authorized_caller(),
+        Some(1),
+        Request::AllowDevice { devnode: "/dev/ttyUSB0".into(), note: None },
+    );
+    assert!(allowed.response.ok, "{:?}", allowed.response.error);
+    assert_eq!(daemon.allowed.len(), 1);
+
+    // Unplug: the allowance must end (section 4.2: "until unplugged").
+    daemon.on_device_removed("/dev/ttyUSB0");
+    assert!(daemon.allowed.is_empty(), "a usb-path-keyed allowance must clear on unplug");
+
+    // Replug on a renumbered tty (same USB path): enforce blocks again.
+    let replug = facts("/dev/ttyUSB1", "1a86", "7523", None, Some("pci-1"));
+    daemon.on_device_facts(&mut io, &replug);
+    assert_eq!(daemon.blocked.len(), 1, "the replugged device must be blocked again");
+}
+
+#[test]
+fn an_unreadable_store_fails_closed_instead_of_enforcing() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted(dir.path());
+    paths.create_dirs().unwrap();
+    // A devices.d FILE makes every store load fail (read_dir on a file).
+    std::fs::remove_dir(paths.devices_dir()).unwrap();
+    std::fs::write(paths.devices_dir(), b"not a directory").unwrap();
+
+    let mut daemon = Daemon::new(paths, Some(10_000));
+    daemon.mode = PolicyMode::Enforce;
+    let mut io = FakeIo::with_px4_and_adapter();
+
+    let handled = daemon.on_device_facts(&mut io, &facts("/dev/ttyUSB0", "1a86", "7523", None, Some("pci-1")));
+    assert!(daemon.blocked.is_empty(), "must not decide enforcement with an unreadable store");
+    assert!(daemon.allowed.is_empty(), "must not mark devices allowed with an unreadable store");
+    assert!(handled.journal.iter().any(|entry| entry.event == "store_unavailable"));
+
+    // Queries surface the store problem instead of reporting an empty bus.
+    let listed = daemon.handle(&mut io, &group_caller(), Some(2), Request::List);
+    assert!(listed.response.ok, "{:?}", listed.response.error);
+    let list: devguard_core::protocol::ListResponse = data_of(&listed);
+    assert!(
+        list.problems.iter().any(|problem| problem.message.contains("could not be read")),
+        "{:?}",
+        list.problems
+    );
 }
