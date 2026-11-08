@@ -1,5 +1,7 @@
 # devguard
 
+> **Naming note (2026-11-08):** the product will ship as **SerialGuard** — crates/GitHub/AUR name `serialguard` (see [`docs/release.md`](docs/release.md)). Crate names stay `devguard-*` until the phase-7 packaging rename.
+
 USB serial device management for PX4 flight controllers, telemetry radios and FTDI/CP210x/CH340 adapters — with a policy daemon, an event-driven desktop UI and a pausable enforce mode.
 
 This app manages and diagnoses USB serial devices; it does not flash or upgrade device firmware.
@@ -18,6 +20,7 @@ Live `apply`/termios/sysfs writes, enforce, pause/resume, real-hardware hotplug 
 
 ## Development docs
 
+- [Release plan & naming (SerialGuard)](docs/release.md)
 - [Requirements & acceptance baseline](docs/requirements.md) (Chinese, as specified)
 - [Phase progress](docs/progress.md)
 - [NSH spike & environment evidence](docs/nsh-spike.md)

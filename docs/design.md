@@ -6,6 +6,8 @@
 
 目标运行平台是 Linux / GTK 4.14+ / systemd / udev。当前编码工具运行于 Windows。Windows 上编译 Rust、headless 测试和窗口检查用于发现代码问题，Linux/Wayland 验收仍须在目标环境执行。
 
+**命名（2026-11-08）**：产品对外发布名定为 **SerialGuard**（`devguard` 在 crates.io 已被占用），crate/二进制在阶段 7 打包时机械改名为 `serialguard-*`；在此之前开发保持现有命名。详见 [`release.md`](release.md)。
+
 NSH 固定使用当前已安装的 `0.4.0`，精确 API 以该版本 crate 源码为准；官网 main 文档可能更新更快。GUI 为纯 Rust，保留官方模板的 `#[native_module]`、`#[component]`、`nsh.json` 和平台入口结构。
 
 ### 阶段 2 Linux 壳的安全边界

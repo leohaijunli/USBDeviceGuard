@@ -23,10 +23,11 @@
 | 1 core + 配置 | 完成（软件可测部分） | Windows 28 单元 + 9 集成通过；Linux 另含 1 项 symlink 集成和 5 项 Unix 客户端测试 |
 | 2 daemon + udev | **完成（部署级验收通过）**：system 模式规则激活 + 真实插拔后链接权限正确；物理插拔的桌面层（Arch/Omarchy 特有 Wayland 部分）归阶段 0/4 的桌面验收 | 纯核心 22 项、Inventory 4、socket RPC 9、CLI 9 操作、`udevadm verify` 通过；WSL 实机枚举 0→1、热插拔事件闭环、system 模式下 daemon 生成并 reload 真实 `/etc/udev/rules.d/90-devguard.rules`、`udevadm test` 命中、真实插拔后 symlink/dialout/0660/MM 标记全部正确、check 四项 ok（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`、`linux-system-mode-2026-11-08.md`） |
 | 3 termios/check/run | 完成（pty 门禁 + 真机 apply/check/run 验收通过） | WSL 116 项测试（含 pty 9 + run 端到端 2）；真机 apply 写入 115200 8N1 raw 并回读验证、偏差注入/检出/修复闭环、run 的 fd 继承在实机验证（`artifacts/linux-real-termios-2026-11-08.md`）；实测 cdc_acm/vhci 不保持 CS7，5-7 数据位申请将得到明确回读错误 |
-| 4 事件/polkit/systemd | 未开始 | 需要 Linux system bus、polkit agent、systemd |
-| 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境 |
+| 3.5 P0 修复 | 完成 | 允许表按 devnode 拔出即清（回归测试覆盖复插再拦截）、store 读取失败 fail-closed（`store_unavailable` 审计 + list 以 problem 展示）、CDC-ACM learn 草稿 baud=n/a |
+| 4 事件/polkit/systemd | 未开始 | 优先级：`devguard-apply@.service`（插拔后自动修复 termios）> systemd 单元 > polkit；WSL 有 systemd 可开发，桌面 polkit agent 验收需目标机 |
+| 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境；完成后发布 alpha |
 | 6 正式 GUI | 未开始 | 当前 GUI 仅最小 NSH 骨架 |
-| 7 打包/文档 | 未开始 | 文档随开发更新，系统安装文件按已验收功能交付 |
+| 7 打包/文档 | 未开始 | 发布计划见 [`release.md`](release.md)；**本阶段执行 SerialGuard 机械改名** |
 
 ## 记录约定
 
