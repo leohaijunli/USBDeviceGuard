@@ -9,7 +9,10 @@ pub mod journal;
 pub mod paths;
 pub mod policy;
 pub mod protocol;
+pub mod runtime_env;
 pub mod store;
+#[cfg(target_os = "linux")]
+pub mod termios;
 pub mod util;
 
 #[cfg(unix)]
@@ -29,4 +32,5 @@ pub use protocol::{
     Event, EventMessage, Operator, PolicyState, ProtocolError, Request, RequestEnvelope,
     ResponseEnvelope, PROTOCOL_VERSION,
 };
+pub use runtime_env::RuntimeEnv;
 pub use store::{ConfigLoadError, DeviceStore, LoadedStore, SaveOutcome};

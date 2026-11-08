@@ -2,10 +2,13 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 
+use devguard_core::protocol::AppliedSetting;
+use devguard_core::runtime_env::RuntimeEnv;
 use devguard_core::{CheckItem, CheckReport, DeviceConfig, DoctorItem, DoctorStatus, Paths, UdevFacts};
 
 use crate::io::{ApplyOutcome, DeviceIo};
 use crate::rules::{self, RULES_HEADER};
+use crate::linux::termios;
 
 use super::{accounts, inventory::Inventory};
 
@@ -30,8 +33,34 @@ impl DeviceIo for LinuxIo {
         self.inventory.facts_for_devnode(devnode)
     }
 
-    fn apply(&mut self, _config: &DeviceConfig, _facts: &UdevFacts) -> Result<ApplyOutcome, String> {
-        Err("live device writes are disabled; termios/apply acceptance is still pending".into())
+    fn apply(&mut self, config: &DeviceConfig, facts: &UdevFacts) -> Result<ApplyOutcome, String> {
+        // Phase-3 scope: termios + runtime env file.  Symlink, group/mode and
+        // the ModemManager flag stay udev-rule driven (staged in phase 2),
+        // and autosuspend awaits its own sysfs acceptance gate.
+        // `termios::apply` fails when the read-back differs from the config.
+        let actual = termios::apply(&facts.devnode, &config.serial)?;
+        let mut applied = vec![AppliedSetting {
+            key: "termios.device".into(),
+            value: facts.devnode.clone(),
+        }];
+        if let Some(rate) = actual.baud {
+            applied.push(AppliedSetting { key: "termios.baud".into(), value: rate.to_string() });
+        }
+        applied.push(AppliedSetting { key: "termios.data_bits".into(), value: actual.data_bits.to_string() });
+        applied.push(AppliedSetting { key: "termios.parity".into(), value: actual.parity.serial_key().to_owned() });
+        applied.push(AppliedSetting { key: "termios.stop_bits".into(), value: actual.stop_bits.to_string() });
+        applied.push(AppliedSetting { key: "termios.flow".into(), value: actual.flow.to_string() });
+        applied.push(AppliedSetting { key: "termios.raw".into(), value: u8::from(actual.raw).to_string() });
+        let mut warnings = vec![
+            "autosuspend (power/control) is not applied: its Linux sysfs acceptance is a later phase gate".into(),
+        ];
+        if self.sandbox {
+            warnings.push("sandbox: the stable symlink needs rule activation on the target system".into());
+        }
+        let env = RuntimeEnv::new(&facts.devnode, config.serial.clone());
+        devguard_core::store::atomic_write(&self.paths.runtime_env(&config.name), env.render().as_bytes(), 0o644)
+            .map_err(|error| format!("cannot write the runtime env file: {error}"))?;
+        Ok(ApplyOutcome { devnode: facts.devnode.clone(), applied, warnings })
     }
 
     fn check(&self, config: &DeviceConfig, facts: &UdevFacts) -> CheckReport {
@@ -61,7 +90,33 @@ impl DeviceIo for LinuxIo {
         } else {
             CheckItem::warning(format!("{}.modem_manager", config.name), "ModemManager ignore flag missing", "ID_MM_DEVICE_IGNORE is not 1", "activate the reviewed rules; no service is disabled automatically")
         });
-        items.push(CheckItem::warning(format!("{}.live_apply", config.name), "full device verification pending", "termios and autosuspend are not yet verified", "complete phase-3 pty tests and Linux hardware acceptance before using enforce"));
+        items.push(match termios::read(&facts.devnode) {
+            Ok(actual) => {
+                let drift = termios::drift(&config.serial, &actual);
+                if drift.is_empty() {
+                    CheckItem::ok(format!("{}.termios", config.name), "line discipline matches the configuration")
+                } else {
+                    let actual = drift
+                        .iter()
+                        .map(|(key, _, got)| format!("{key}={got}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    CheckItem::warning(
+                        format!("{}.termios", config.name),
+                        "line discipline differs from the configuration",
+                        actual,
+                        "run apply to set the configured line discipline",
+                    )
+                }
+            }
+            Err(error) => CheckItem::warning(
+                format!("{}.termios", config.name),
+                "termios cannot be inspected",
+                error,
+                "check that the daemon user may open the device; reading termios requires opening the tty",
+            ),
+        });
+        items.push(CheckItem::warning(format!("{}.autosuspend", config.name), "autosuspend not yet verified", "power/control is not managed yet", "sysfs power writes await their phase gate; no service setting is changed"));
         CheckReport::new(Some(config.name.clone()), items.into_iter().map(|item| item.with_device(&config.name)).collect())
     }
 
@@ -103,7 +158,7 @@ impl DeviceIo for LinuxIo {
     }
 
     fn doctor_probe(&self) -> Vec<DoctorItem> {
-        let mut items = vec![DoctorItem::new("phase2", "Hardware writes are not enabled", DoctorStatus::Warning, "apply, pause, policy changes and USB authorization await their phase gates")];
+        let mut items = vec![DoctorItem::new("phase3", "termios apply is enabled; enforcement writes are not", DoctorStatus::Warning, "apply sets the line discipline and writes the runtime env file; pause, policy changes and USB authorization await their phase gates")];
         if self.sandbox {
             items.push(DoctorItem::new("sandbox", "Private development sandbox", DoctorStatus::Warning, "configuration and rules stay under --root; host udev rules are never reloaded"));
         }

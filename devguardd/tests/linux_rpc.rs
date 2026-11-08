@@ -86,6 +86,37 @@ async fn saved_configuration_note_is_retrievable_through_the_audit_api() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_is_routed_to_the_io_layer_instead_of_being_unsupported() {
+    use devguard_core::client::ClientError;
+
+    let harness = Harness::start(AccessPolicy::sandbox());
+    let socket = harness.paths.socket();
+    tokio::task::spawn_blocking(move || {
+        let mut client = Client::connect(socket).unwrap();
+        // No registered device: the request must reach the decision core and
+        // come back as a normal not_found, not the phase-2
+        // "request_unavailable" gate.
+        let error = client.request(Request::Apply { name: Some("radio-1".into()), devnode: None }).unwrap_err();
+        assert!(matches!(error, ClientError::Protocol(error) if error.code == "not_found"));
+    }).await.unwrap();
+    harness.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pause_stays_unavailable_until_its_phase_gate() {
+    use devguard_core::client::ClientError;
+
+    let harness = Harness::start(AccessPolicy::sandbox());
+    let socket = harness.paths.socket();
+    tokio::task::spawn_blocking(move || {
+        let mut client = Client::connect(socket).unwrap();
+        let error = client.request(Request::Pause { kind: devguard_core::PauseKind::Service, minutes: 5, note: None }).unwrap_err();
+        assert!(matches!(error, ClientError::Protocol(error) if error.code == "unsupported"));
+    }).await.unwrap();
+    harness.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_responses_return_a_correlated_actionable_error() {
     use devguard_core::client::ClientError;
 

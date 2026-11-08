@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use devguard_core::{DeviceConfig, LogFilter, Request};
 
+#[cfg(target_os = "linux")]
+pub mod run;
+
 #[derive(Debug, Parser)]
 #[command(version, about = "USB serial device management client")]
 pub struct Args {
@@ -25,6 +28,15 @@ pub enum Command {
     Save { file: PathBuf, #[arg(long)] note: Option<String> },
     Delete { #[arg(value_parser = valid_name)] name: String, #[arg(long)] note: Option<String> },
     Check { #[arg(value_parser = valid_name)] name: Option<String> },
+    /// Set the configured line discipline on a registered device (phase 3).
+    Apply {
+        #[arg(value_parser = valid_name)]
+        name: Option<String>,
+        /// Alternative to `name`: apply to whatever registered device
+        /// matches this devnode.
+        #[arg(long)]
+        devnode: Option<String>,
+    },
     Doctor,
     ServiceState,
     PolicyGet,
@@ -35,6 +47,18 @@ pub enum Command {
     },
     /// Stream events until disconnected or interrupted.
     Watch,
+    /// Set the line discipline from the runtime env file, then exec the
+    /// command with the device as stdin/stdout/stderr (Linux only; does not
+    /// use the daemon socket).
+    Run {
+        #[arg(value_parser = valid_name)]
+        name: String,
+        /// Runtime env file; defaults to /run/devguard/<name>.env.
+        #[arg(long)]
+        env: Option<PathBuf>,
+        #[arg(last = true)]
+        command: Vec<std::ffi::OsString>,
+    },
     Shutdown { #[arg(long)] keep_blocked: bool, #[arg(long)] note: Option<String> },
 }
 
@@ -53,11 +77,20 @@ impl Command {
             }
             Self::Delete { name, note } => Request::DeleteDevice { name: name.clone(), note: note.clone() },
             Self::Check { name } => Request::Check { name: name.clone() },
+            Self::Apply { name, devnode } => {
+                anyhow::ensure!(
+                    name.is_some() || devnode.is_some(),
+                    "apply needs a registered device name or --devnode <path>"
+                );
+                Request::Apply { name: name.clone(), devnode: devnode.clone() }
+            }
             Self::Doctor => Request::Doctor,
             Self::ServiceState => Request::ServiceState,
             Self::PolicyGet => Request::PolicyGet,
             Self::Log { name, event, limit } => Request::LogQuery { filter: LogFilter { name: name.clone(), event: event.clone(), limit: Some(usize::from(*limit)), ..LogFilter::default() } },
             Self::Watch => Request::SubscribeEvents,
+            // `run` never reaches the daemon: main() dispatches it locally.
+            Self::Run { .. } => anyhow::bail!("run is executed locally and does not use the daemon socket"),
             Self::Shutdown { keep_blocked, note } => Request::Shutdown { release_blocked: !keep_blocked, note: note.clone() },
         })
     }
@@ -91,6 +124,15 @@ mod tests {
     fn shutdown_releases_by_default_and_keeps_the_note() {
         let args = Args::try_parse_from(["devguardctl", "shutdown", "--note", "maintenance"]).unwrap();
         assert!(matches!(args.command.request().unwrap(), Request::Shutdown { release_blocked: true, note: Some(note) } if note == "maintenance"));
+    }
+
+    #[test]
+    fn apply_needs_a_name_or_devnode() {
+        assert!(Args::try_parse_from(["devguardctl", "apply"]).unwrap().command.request().is_err());
+        let by_name = Args::try_parse_from(["devguardctl", "apply", "px4-main"]).unwrap();
+        assert!(matches!(by_name.command.request().unwrap(), Request::Apply { name: Some(name), devnode: None } if name == "px4-main"));
+        let by_devnode = Args::try_parse_from(["devguardctl", "apply", "--devnode", "/dev/ttyACM0"]).unwrap();
+        assert!(matches!(by_devnode.command.request().unwrap(), Request::Apply { name: None, devnode: Some(node) } if node == "/dev/ttyACM0"));
     }
 
     #[test]

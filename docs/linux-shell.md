@@ -31,7 +31,19 @@ cargo run -p devguardctl -- --socket "$HOME/.cache/devguard-sandbox/run/devguard
 cargo run -p devguardctl -- --socket "$HOME/.cache/devguard-sandbox/run/devguard/ctl.sock" shutdown --note "development session ended"
 ```
 
-`--root` 下的规则仅写入私有树，**不 reload 主机 udev、不创建真实设备链接、不打开串口**。根目录必须属于当前工程师，拒绝 `..`、根目录 symlink、混合系统/私有路径和解析到 `/` 的别名。socket 模式为 `0660`；不会自动删除已有文件或另一个 daemon 的 socket。普通关闭只清理自己创建的同 inode socket，强制杀进程后的遗留 socket需工程师确认后处理。
+### 阶段 3：apply 与 run
+
+`apply` 在阶段 3 起写入**串口线路参数**（termios 设置 + 回读校验）并生成 runtime env 文件；不写 USB `authorized`、不改 udev 主机规则。对真实设备执行前需工程师确认（打开设备可能置位 DTR）：
+
+```sh
+B="$CARGO_TARGET_DIR/debug"
+$B/devguardctl --socket "$HOME/.cache/devguard-sandbox/run/devguard/ctl.sock" apply <登记名>
+$B/devguardctl run <登记名> --env "$HOME/.cache/devguard-sandbox/run/devguard/<登记名>.env" -- <串口程序...>
+```
+
+`run` 不联系 daemon：读 env 文件 → 设置并校验 termios → 把设备作为子进程的 stdin/stdout/stderr 执行。env 缺失或 devnode 失效都会明确报错。注意：读 termios 需要打开 tty，`check`/`show` 因此与 `stty` 有同样的 open 副作用（不写字节）。
+
+`--root` 下的规则仅写入私有树，**不 reload 主机 udev、不创建真实设备链接、不打开串口**（termios apply 打开设备是阶段 3 门禁内唯一的设备访问）。根目录必须属于当前工程师，拒绝 `..`、根目录 symlink、混合系统/私有路径和解析到 `/` 的别名。socket 模式为 `0660`；不会自动删除已有文件或另一个 daemon 的 socket。普通关闭只清理自己创建的同 inode socket，强制杀进程后的遗留 socket需工程师确认后处理。
 
 WSL 里的 USB 列表可能为空：Windows 的 COM 口不会自动映射为 Linux tty。真实 USB 转接和插拔验收需要另行确认，不包含在本轮软件测试中。
 

@@ -409,7 +409,9 @@ impl<I: DeviceIo> Runtime<I> {
             self.journal.append(&JournalEntry::new("request_received").operator(caller.uid, &caller.user)
                 .details(serde_json::json!({"op": request.name()})))?;
         }
-        let supported = !matches!(request, Request::Apply { .. } | Request::Pause { .. } | Request::Resume { .. } | Request::PolicySet { .. } | Request::BlockDevice { .. } | Request::AllowDevice { .. });
+        // Phase 3 enables apply (termios + env file).  Enforcement-adjacent
+        // writes stay unavailable until their phase gates pass.
+        let supported = !matches!(request, Request::Pause { .. } | Request::Resume { .. } | Request::PolicySet { .. } | Request::BlockDevice { .. } | Request::AllowDevice { .. });
         let handled = if supported {
             self.daemon.handle(&mut self.io, caller, id, request)
         } else {

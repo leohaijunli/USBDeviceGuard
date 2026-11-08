@@ -24,7 +24,7 @@ NSH 固定使用当前已安装的 `0.4.0`，精确 API 以该版本 crate 源�
 | --- | --- | --- |
 | 身份键 | serial 存在时只以 serial 匹配；不能在 serial 不匹配时退回 path | core 初稿需复核；待阶段 1/2 |
 | PX4 bootloader | 同一逻辑设备多 ids；未知 PID 不自动猜为可信身份 | 待真机运行态/bootloader 对照 |
-| 波特率 | apply 设置并回读；run 保持 fd 至 exec 的行为需 Linux 验证；CDC-ACM baud 不作漂移校验 | 待 pty / CDC-ACM |
+| 波特率 | apply 设置并回读；`termios::apply` 已实现"设置+回读+比对"一体化（`TCSANOW`，`BaudRate::NotApplicable` 不写速度不比对）；run 把设备 fd `dup2` 到 0/1/2 后 exec，pty 端到端已验证；CDC-ACM baud 不作漂移校验 | pty 门禁已过；CDC-ACM 实机回读待真机确认 |
 | ModemManager/brltty | udev 忽略标记；doctor 说明抢占证据与修复方式 | 待 udev 和服务实测 |
 | 自动挂起 | 只操作已确认 USB 设备的 power 属性；service 暂停禁止写 | 待 Linux sysfs |
 | 轻量 udev | 链接、权限、systemd oneshot 触发；停止时 oneshot 不能意外拉起 daemon | 待单元依赖与 udev 测试 |
@@ -32,6 +32,13 @@ NSH 固定使用当前已安装的 `0.4.0`，精确 API 以该版本 crate 源�
 | audit/enforce | audit 默认；服务端重新 check 后切 enforce，不能只信任 GUI 先前的检查结果 | 待阶段 5 |
 
 ## 必须在实现前解决的语义
+
+### termios 的读取副作用与 pty 局限（2026-11-08 实测）
+
+- 读 termios 必须打开 tty（`stty` 同样的副作用）：部分驱动把 open 当作 DTR 置位。`check` 用 `O_RDONLY|O_NOCTTY|O_NONBLOCK` 最小化影响，不向线路写任何字节；这是检查真实线路参数的固有代价，不是可消除的副作用。
+- pty 驱动强制 CSIZE=CS8 并可能对标志组合返回 EINVAL：数据位 5-7 的回读验证只能在真机驱动（cdc_acm/ftdi 等）上完成；baud/parity/stop_bits/flow/raw 在 pty 上可完整往返（Ubuntu 26.04 / 6.6 内核实测）。
+- `termios::apply` 的契约是"设置 → 回读 → 比对"，回读不一致返回错误并附逐字段描述；调用方（`LinuxIo::apply`、`devguardctl run`）不得自行声称成功。
+- env 文件（`/run/devguard/<name>.env`，沙箱在私有树内）是 daemon 与 CLI 的稳定契约：`run` 不联系 daemon，env 缺失或设备消失都明确报错，不静默换设备。
 
 ### 复合 USB 设备
 

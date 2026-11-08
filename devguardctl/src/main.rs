@@ -15,6 +15,20 @@ fn run(args: Args) -> anyhow::Result<()> {
     use devguard_core::protocol::ListResponse;
     use devguardctl::Command;
 
+    // `run` is executed locally: it sets the line discipline from the
+    // runtime env file and execs, never contacting the daemon.
+    if let Command::Run { name, env, command } = &args.command {
+        #[cfg(target_os = "linux")]
+        {
+            return devguardctl::run::execute(&devguardctl::run::env_path(name, env.as_deref()), command);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (name, env, command);
+            anyhow::bail!("`run` sets a real line discipline and only works on Linux/WSL; the Windows GUI covers diagnostics")
+        }
+    }
+
     let mut client = Client::connect(&args.socket)
         .map_err(|error| anyhow::anyhow!("cannot connect to {}: {error}; start devguardd or use --socket", args.socket.display()))?;
     let request = args.command.request()?;

@@ -22,7 +22,7 @@
 | 0 NSH spike | Windows 侧完成；Linux 验收被用户暂缓 | 17 项测试 + 7 张原生截图；`scripts/verify-nsh-linux.sh` 待 Arch/Omarchy 执行 |
 | 1 core + 配置 | 完成（软件可测部分） | Windows 28 单元 + 9 集成通过；Linux 另含 1 项 symlink 集成和 5 项 Unix 客户端测试 |
 | 2 daemon + udev | audit/配置 RPC 与 CLI 软件链路通过；WSL 实机只读转接与热插拔事件验收通过；桌面规则激活与物理插拔未完成 | 纯核心 22 项、Linux Inventory 4 项及 socket RPC 9 项通过；实际 CLI 9 次操作、私有规则 `udevadm verify` 通过；WSL 实机转接后枚举 0→1，learn/save/check/doctor/规则匹配键对实机验证通过，detach/attach 真实 udev 事件（remove/added）闭环通过（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`）；`apply`、规则安装到主机及桌面物理插拔门禁仍未完成 |
-| 3 termios/check/run | 未开始 | 需要 Linux pty 与真机 |
+| 3 termios/check/run | 软件完成（pty 门禁通过，116 项测试）；真机 termios apply 待工程师确认 | pty 9 项 + run 端到端 2 项通过；`termios::apply` 设置+回读+比对一体化；`LinuxIo::apply` 写 env 文件；`check` 真实 termios 比对；`devguardctl run` fd 继承验证；实机 8N1/raw apply 待确认（不碰固件/authorized） |
 | 4 事件/polkit/systemd | 未开始 | 需要 Linux system bus、polkit agent、systemd |
 | 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境 |
 | 6 正式 GUI | 未开始 | 当前 GUI 仅最小 NSH 骨架 |
@@ -77,6 +77,18 @@
 - 真实 udev 事件闭环：`usbipd detach` → watch 收到 `device_removed`（seq 1，按登记设备名报告）；`usbipd attach` → `device_added`（seq 2，完整 facts 含复合接口标志、`managed_by`、`binding=serial`、三条预期 note）；复插后 `list` 正常。事件连续、版本化，journal 带 `source=udev_monitor` 与 udev_seq。
 - `shutdown` 正常退出，journal `service_stopping` 记录 `blocked_devices: []`。全程只读。原始记录：`artifacts/linux-real-hotplug-2026-11-07.md`（不提交）。
 - 说明：这是 WSL 内 usbipd detach/attach 产生的**真实 udev 事件**，但仍不等同桌面 Linux 物理插拔验收。
+
+### 阶段 3 termios/check/run 软件实现（2026-11-08）
+
+- 新增 `devguard-core/src/termios.rs`（仅 Linux）：`apply` 打开设备（`O_RDWR|O_NOCTTY|O_NONBLOCK`）→ `TCSANOW` 写线路参数 → 回读 → **与配置比对，不一致即失败**，调用方拿不到未验证的成功；`read` 只读打开做检查。`BaudRate::NotApplicable`（CDC-ACM）不写也不比对线路速度。
+- 新增 `devguard-core/src/runtime_env.rs`：`/run/devguard/<name>.env`（沙箱在私有树内）的共享模型，daemon 写、CLI 读；未知键拒绝，避免 daemon/CLI 静默不一致。
+- `LinuxIo::apply` 启用（阶段 2 是明确拒绝的桩）：termios 设置与回读校验 → 写 runtime env 文件 → `AppliedSetting` 逐字段报告；autosuspend 与 symlink/权限仍归各自阶段门禁，apply 的 warnings 如实说明。
+- `LinuxIo::check` 的 `live_apply` 硬编码告警替换为真实 termios 比对项 + 独立的 `autosuspend` 待验收项；打不开设备（权限/非 tty）报 warning 而非伪通过。
+- `devguardctl run <name> -- <cmd>`（仅 Linux）：读 env → 设置并校验 termios → 清 `O_NONBLOCK` → 设备 fd `dup2` 到 0/1/2 → `exec`；进程被替换，子进程以设备为 stdio。错误路径（env 缺失、设备消失、回读不一致）都在 exec 前中止。
+- server 派发表移除 `Apply`（Pause/Resume/PolicySet/Block/Allow 仍留阶段 5）；RPC 回归测试确认 apply 走决策核心而 pause 仍 `unsupported`。
+- **实测 pty 限制（Ubuntu 26.04 / 6.6 内核）**：pty 驱动强制 CSIZE=CS8，数据位 5-7 无法在 pty 上回读验证；baud、parity（PARENB）、stop_bits、flow（含 CRTSCTS）、raw 均可往返。数据位验证归入真机验收。测试 `a_pty_never_claims_character_sizes_it_cannot_hold` 锁定该诚实行为。
+- 测试结果：WSL **116 项通过**（core 34+5+10、CLI 7+2 pty、daemon 8+16+5+4+5+11 RPC+9 pty termios），两端 `clippy --all-targets -- -D warnings` 通过；Windows 侧 core+CLI 全绿。
+- **真机 termios apply 门禁待工程师确认**：对 `/dev/ttyACM0` 执行 apply 会打开设备（DTR 可能置位）并写 CDC 线路参数（不碰固件、不写 authorized）。确认前实机 apply 不执行。
 
 - 工程师取消固件刷写，要求继续 `USBDeviceGuard`；本轮没有串口打开、固件写入、USB 转接/反授权、系统规则安装或服务配置变更。
 - 当前主机是 Windows `LMX`，仓库位于 `C:\Users\leeli\Downloads\USBDeviceGuard`。开始时 `main` 工作树干净，HEAD 为 `5d4dd01`。
