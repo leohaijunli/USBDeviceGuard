@@ -37,6 +37,7 @@ NSH 固定使用当前已安装的 `0.4.0`，精确 API 以该版本 crate 源�
 
 - 读 termios 必须打开 tty（`stty` 同样的副作用）：部分驱动把 open 当作 DTR 置位。`check` 用 `O_RDONLY|O_NOCTTY|O_NONBLOCK` 最小化影响，不向线路写任何字节；这是检查真实线路参数的固有代价，不是可消除的副作用。
 - pty 驱动强制 CSIZE=CS8 并可能对标志组合返回 EINVAL：数据位 5-7 的回读验证只能在真机驱动（cdc_acm/ftdi 等）上完成；baud/parity/stop_bits/flow/raw 在 pty 上可完整往返（Ubuntu 26.04 / 6.6 内核实测）。
+- 真机实测（2026-11-08，cdc_acm 经 vhci 链路）：`cs7` 写入后读回仍 CS8 —— 该驱动/固件组合不保持数据位 5-7，`apply` 的回读契约会诚实失败而非静默错误配置；8N1 完全可用。
 - `termios::apply` 的契约是"设置 → 回读 → 比对"，回读不一致返回错误并附逐字段描述；调用方（`LinuxIo::apply`、`devguardctl run`）不得自行声称成功。
 - env 文件（`/run/devguard/<name>.env`，沙箱在私有树内）是 daemon 与 CLI 的稳定契约：`run` 不联系 daemon，env 缺失或设备消失都明确报错，不静默换设备。
 

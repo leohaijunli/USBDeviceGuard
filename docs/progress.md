@@ -22,7 +22,7 @@
 | 0 NSH spike | Windows 侧完成；Linux 验收被用户暂缓 | 17 项测试 + 7 张原生截图；`scripts/verify-nsh-linux.sh` 待 Arch/Omarchy 执行 |
 | 1 core + 配置 | 完成（软件可测部分） | Windows 28 单元 + 9 集成通过；Linux 另含 1 项 symlink 集成和 5 项 Unix 客户端测试 |
 | 2 daemon + udev | audit/配置 RPC 与 CLI 软件链路通过；WSL 实机只读转接与热插拔事件验收通过；桌面规则激活与物理插拔未完成 | 纯核心 22 项、Linux Inventory 4 项及 socket RPC 9 项通过；实际 CLI 9 次操作、私有规则 `udevadm verify` 通过；WSL 实机转接后枚举 0→1，learn/save/check/doctor/规则匹配键对实机验证通过，detach/attach 真实 udev 事件（remove/added）闭环通过（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`）；`apply`、规则安装到主机及桌面物理插拔门禁仍未完成 |
-| 3 termios/check/run | 软件完成（pty 门禁通过，116 项测试）；真机 termios apply 待工程师确认 | pty 9 项 + run 端到端 2 项通过；`termios::apply` 设置+回读+比对一体化；`LinuxIo::apply` 写 env 文件；`check` 真实 termios 比对；`devguardctl run` fd 继承验证；实机 8N1/raw apply 待确认（不碰固件/authorized） |
+| 3 termios/check/run | 完成（pty 门禁 + 真机 apply/check/run 验收通过） | WSL 116 项测试（含 pty 9 + run 端到端 2）；真机 apply 写入 115200 8N1 raw 并回读验证、偏差注入/检出/修复闭环、run 的 fd 继承在实机验证（`artifacts/linux-real-termios-2026-11-08.md`）；实测 cdc_acm/vhci 不保持 CS7，5-7 数据位申请将得到明确回读错误 |
 | 4 事件/polkit/systemd | 未开始 | 需要 Linux system bus、polkit agent、systemd |
 | 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境 |
 | 6 正式 GUI | 未开始 | 当前 GUI 仅最小 NSH 骨架 |
@@ -89,6 +89,15 @@
 - **实测 pty 限制（Ubuntu 26.04 / 6.6 内核）**：pty 驱动强制 CSIZE=CS8，数据位 5-7 无法在 pty 上回读验证；baud、parity（PARENB）、stop_bits、flow（含 CRTSCTS）、raw 均可往返。数据位验证归入真机验收。测试 `a_pty_never_claims_character_sizes_it_cannot_hold` 锁定该诚实行为。
 - 测试结果：WSL **116 项通过**（core 34+5+10、CLI 7+2 pty、daemon 8+16+5+4+5+11 RPC+9 pty termios），两端 `clippy --all-targets -- -D warnings` 通过；Windows 侧 core+CLI 全绿。
 - **真机 termios apply 门禁待工程师确认**：对 `/dev/ttyACM0` 执行 apply 会打开设备（DTR 可能置位）并写 CDC 线路参数（不碰固件、不写 authorized）。确认前实机 apply 不执行。
+
+### 阶段 3 真机 termios 验收（2026-11-08，已通过）
+
+- 工程师确认后对转接设备（`V6X-RUST-001`，WSL 重启后重新 attach）执行完整闭环：
+  - **apply**：115200 8N1 raw 写入并回读验证，CDC-ACM 接受 SET_LINE_CODING；env 文件生成、`AppliedSetting` 逐字段报告、warnings 如实。
+  - **偏差闭环**（需求 §10）：外部 `stty` 注入 7O2+cooked → `check` 检出 `parity=o stop_bits=2 flow=software raw=0` → `apply` 修复 → `check` 恢复 ok。
+  - **run 真机端到端**：子进程 stdin 为设备 fd，`stty -a` 读回 `speed 115200`；journal 两次 `applied` 审计完整。
+- **实测**：`cs7` 写入后读回仍 CS8 —— cdc_acm（vhci 链路）不保持 CSIZE 5-7；`apply` 的回读契约会在此类配置上诚实失败。与 pty 的 CS8 强制一并记录于 design.md。
+- 全程未写固件、未写 `authorized`/power、未装主机规则。原始记录：`artifacts/linux-real-termios-2026-11-08.md`（不提交）。
 
 - 工程师取消固件刷写，要求继续 `USBDeviceGuard`；本轮没有串口打开、固件写入、USB 转接/反授权、系统规则安装或服务配置变更。
 - 当前主机是 Windows `LMX`，仓库位于 `C:\Users\leeli\Downloads\USBDeviceGuard`。开始时 `main` 工作树干净，HEAD 为 `5d4dd01`。

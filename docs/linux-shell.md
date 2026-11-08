@@ -33,7 +33,7 @@ cargo run -p devguardctl -- --socket "$HOME/.cache/devguard-sandbox/run/devguard
 
 ### 阶段 3：apply 与 run
 
-`apply` 在阶段 3 起写入**串口线路参数**（termios 设置 + 回读校验）并生成 runtime env 文件；不写 USB `authorized`、不改 udev 主机规则。对真实设备执行前需工程师确认（打开设备可能置位 DTR）：
+`apply` 在阶段 3 起写入**串口线路参数**（termios 设置 + 回读校验）并生成 runtime env 文件；不写 USB `authorized`、不改 udev 主机规则。对真实设备的 apply 已于 2026-11-08 经工程师确认完成验收（见 `artifacts/linux-real-termios-2026-11-08.md`）：
 
 ```sh
 B="$CARGO_TARGET_DIR/debug"
