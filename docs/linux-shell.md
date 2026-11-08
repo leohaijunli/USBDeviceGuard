@@ -93,6 +93,10 @@ WSL 运行后执行此前已确认的 `usbipd attach --wsl --busid 2-3`（1209:0
 
 原始记录见 `artifacts/linux-real-attach-2026-11-07.md` 和热插拔续验 `artifacts/linux-real-hotplug-2026-11-07.md`（均不提交）。下一步：真实桌面 Linux（WSL 外）的规则激活与热插拔验收，再补 termios/apply；在门禁通过前继续禁用硬件写入。
 
+### 部署级验收：system 模式（2026-11-08，已通过）
+
+WSL 内以 root 运行 system 模式（无 `--root`），daemon 自管 `/etc/devguard`、`/run/devguard/ctl.sock`（`root:devguard 0660`）、`/var/lib/devguard`：`save` 生成并 reload 真实 `/etc/udev/rules.d/90-devguard.rules`，`udevadm test` 命中，真实插拔后 symlink/权限/MM 标记正确，check 通过。`devguard` 组已创建；系统规则保留在 WSL（开发环境即"已部署"状态）。详见 `artifacts/linux-system-mode-2026-11-08.md`（不提交）。
+
 ## 项目级 skills
 
 ### 当前硬件接入准备

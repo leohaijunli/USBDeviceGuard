@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | 0 NSH spike | Windows 侧完成；Linux 验收被用户暂缓 | 17 项测试 + 7 张原生截图；`scripts/verify-nsh-linux.sh` 待 Arch/Omarchy 执行 |
 | 1 core + 配置 | 完成（软件可测部分） | Windows 28 单元 + 9 集成通过；Linux 另含 1 项 symlink 集成和 5 项 Unix 客户端测试 |
-| 2 daemon + udev | audit/配置 RPC 与 CLI 软件链路通过；WSL 实机只读转接与热插拔事件验收通过；桌面规则激活与物理插拔未完成 | 纯核心 22 项、Linux Inventory 4 项及 socket RPC 9 项通过；实际 CLI 9 次操作、私有规则 `udevadm verify` 通过；WSL 实机转接后枚举 0→1，learn/save/check/doctor/规则匹配键对实机验证通过，detach/attach 真实 udev 事件（remove/added）闭环通过（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`）；`apply`、规则安装到主机及桌面物理插拔门禁仍未完成 |
+| 2 daemon + udev | **完成（部署级验收通过）**：system 模式规则激活 + 真实插拔后链接权限正确；物理插拔的桌面层（Arch/Omarchy 特有 Wayland 部分）归阶段 0/4 的桌面验收 | 纯核心 22 项、Inventory 4、socket RPC 9、CLI 9 操作、`udevadm verify` 通过；WSL 实机枚举 0→1、热插拔事件闭环、system 模式下 daemon 生成并 reload 真实 `/etc/udev/rules.d/90-devguard.rules`、`udevadm test` 命中、真实插拔后 symlink/dialout/0660/MM 标记全部正确、check 四项 ok（`artifacts/linux-real-{attach,hotplug}-2026-11-07.md`、`linux-system-mode-2026-11-08.md`） |
 | 3 termios/check/run | 完成（pty 门禁 + 真机 apply/check/run 验收通过） | WSL 116 项测试（含 pty 9 + run 端到端 2）；真机 apply 写入 115200 8N1 raw 并回读验证、偏差注入/检出/修复闭环、run 的 fd 继承在实机验证（`artifacts/linux-real-termios-2026-11-08.md`）；实测 cdc_acm/vhci 不保持 CS7，5-7 数据位申请将得到明确回读错误 |
 | 4 事件/polkit/systemd | 未开始 | 需要 Linux system bus、polkit agent、systemd |
 | 5 策略/暂停/服务控制 | 未开始 | 需要可恢复的真实 USB 测试环境 |
@@ -152,6 +152,14 @@
 - 测试：`cargo test -p devguard-core` 26 通过；`nsh test`（校验副本）17 通过 = core/GUI 单元 6 + Rust 交互 10 + TSX headless 3（含真实 USB 扫描启动）；`cargo clippy -p devguard-gui --all-targets -- -D warnings` 通过。
 - 校验副本改用独立 `CARGO_TARGET_DIR`，修复了两套源码路径共用 target 目录导致的构建缓存损坏。
 - 英文界面下 `spike_flows` 全部重写并通过；原生窗口已在用户桌面打开，Devices 页签默认展示。
+
+### 部署级验收：system 模式规则激活 + 真实插拔（2026-11-08，已通过）
+
+- 工程师确认后，daemon 首次以 **system 模式**（root，`/etc`/`/run`/`/var/lib`）运行于 WSL：`devguard` 组创建、socket `root:devguard 0660`、`save` 触发 daemon 写真实 `/etc/udev/rules.d/90-devguard.rules` 并 reload udev。
+- `udevadm test` 命中规则：GROUP=dialout、MODE=0660、SYMLINK 已添加、`ID_MM_DEVICE_IGNORE=1`、`SYSTEMD_WANTS=devguard-apply@ttyACM0.service`（unit 为阶段 4 交付）。
+- **真实插拔后**：`/dev/devguard/rust-fmuv6x-ttyacm0` symlink 由 add 事件创建、devnode `root:dialout 0660`、MM 标记置位；daemon `check` 的 symlink/access/modem_manager 全 ok；termios 如实检出插拔重置（9600 cooked）并由 apply 修复。
+- 插拔循环事件流正常（removed/added，notes 仅剩 termios/autosuspend）；journal 完整（service_started 无 uid、root 操作带 uid=0）；shutdown 清理 socket、保留 env 文件。
+- 全程未写固件、未写 authorized/power。原始记录：`artifacts/linux-system-mode-2026-11-08.md`（不提交）。物理插拔的桌面特有部分（Wayland 桌面通知、polkit agent）归阶段 4/6 桌面验收。
 
 ## 待验收
 
